@@ -1,0 +1,94 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+app-example
+
+.env
+
+.metro-virtual/*
+
+# existing lines …
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+…
+
+# ---- recommended additions ----
+
+# iOS / Android build outputs (if you ever run native builds)
+ios/Pods/
+ios/build/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+
+# Next.js (if you keep any web code)
+.next/
+out/
+
+# Vercel / Expo EAS / other build artifacts
+.vercel/
+build/
+
+# Editor settings
+.vscode/
+.idea/
+*.iml
+
+# Logs & cache
+*.log
+*.log.*
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.haste/
+.cache/
+
+# Supabase or other local dev services
+supabase/.temp/
+supabase/.branches/
+
+# Large media / generated files (optional but common)
+*.aab
+*.apk
+*.ipa
+*.mp4
+*.mov
+*.zip
