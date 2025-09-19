@@ -6,10 +6,12 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { ArrowLeft, RotateCcw, Play, User, Bot } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
+import { supabase } from "../../../utils/supabase";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
 import {
@@ -20,14 +22,14 @@ import {
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
 
-const { width: screenWidth, height: screenHeight } = Dimensions.get("window");
+const { width: screenWidth } = Dimensions.get("window");
 
-/** Dots per side — 7 ⇒ 6×6 boxes. Change to 6/8 if you like. */
+/** Dots per side — 7 ⇒ 6×6 boxes. */
 const DOTS = 7;
 
 /** Index helpers */
 const hIndex = (row, col, N) => row * (N - 1) + col; // row: 0..N-1, col: 0..N-2
-const vIndex = (row, col, N) => row * N + col; // row: 0..N-2, col: 0..N-1
+const vIndex = (row, col, N) => row * N + col;       // row: 0..N-2, col: 0..N-1
 const boxIndex = (row, col, N) => row * (N - 1) + col;
 
 export default function DotsAndBoxesGame() {
@@ -51,41 +53,7 @@ export default function DotsAndBoxesGame() {
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
-        setCurrentPlayerId(saved ? parseInt(saved) : 1);
-      } catch {
-        setCurrentPlayerId(1);
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    let currentGameId = null;
-    (async () => {
-      if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.DOTS_AND_BOXES);
-      if (id && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        try {
-          await gameTracker.startGame(id, currentPlayerId);
-        } catch {}
-      }
-    })();
-    return () => {
-      mounted = false;
-      if (currentGameId) {
-        try {
-          gameTracker.endGame(currentGameId, 0);
-        } catch {}
-      }
-    };
-  }, [currentPlayerId]);
-
+  // Fonts
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -100,9 +68,7 @@ export default function DotsAndBoxesGame() {
   const [aiScore, setAiScore] = useState(0);
 
   /** Lines store OWNER: 0 none, 1 player, 2 AI */
-  const [horizontal, setHorizontal] = useState(
-    Array(DOTS * (DOTS - 1)).fill(0)
-  );
+  const [horizontal, setHorizontal] = useState(Array(DOTS * (DOTS - 1)).fill(0));
   const [vertical, setVertical] = useState(Array((DOTS - 1) * DOTS).fill(0));
 
   /** Boxes store OWNER: 0 none, 1 player, 2 AI */
@@ -117,7 +83,22 @@ export default function DotsAndBoxesGame() {
   // Live preview segment (under finger)
   const [hoverSeg, setHoverSeg] = useState(null); // {type, index} | null
 
-  // Load/save record
+  // Track whether this round was fully completed (to decide submit vs cancel)
+  const submittedRef = useRef(false);
+
+  // Load player id
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(saved ? parseInt(saved) : 1);
+      } catch {
+        setCurrentPlayerId(1);
+      }
+    })();
+  }, []);
+
+  // Load saved W/L/D for display
   useEffect(() => {
     (async () => {
       try {
@@ -132,7 +113,7 @@ export default function DotsAndBoxesGame() {
     } catch {}
   }, []);
 
-  // Timer
+  // Timer tick
   useEffect(() => {
     let interval;
     if (gameStarted && gameState === "playing") {
@@ -142,19 +123,17 @@ export default function DotsAndBoxesGame() {
   }, [gameStarted, gameState]);
 
   // ---------- LAYOUT ----------
-  // Make the board as big as we can while keeping padding safe
   const boardOuter = Math.min(Math.max(screenWidth - 12, 380), 520);
   const pad = 18;
   const boardInner = boardOuter - pad * 2;
   const cell = boardInner / (DOTS - 1);
-  const dot = 8;
-  const line = 10;
-  const track = 8;
+  const dot = 10;
+  const line = 12;
+  const track = 10;
 
-  // Tolerance for snapping to a segment (tight so it can't misunderstand)
-  // Must be close to the axis *and* within the segment extents.
+  // Tolerance for snapping to a segment
   const AXIS_TOL = Math.min(26, Math.max(16, cell * 0.22)); // px distance from axis
-  const DECISION_GAP = 6; // require at least this many px advantage to switch axis
+  const DECISION_GAP = 6; // must beat the other axis by this many px
 
   // ---------- RULE HELPERS ----------
   const isBoxCompleted = useCallback((row, col, H, V) => {
@@ -190,8 +169,7 @@ export default function DotsAndBoxesGame() {
 
   const createsThirdSideForAnyBox = useCallback(
     (moveType, moveIndex, H, V) => {
-      const H2 = [...H],
-        V2 = [...V];
+      const H2 = [...H], V2 = [...V];
       if (moveType === "horizontal") H2[moveIndex] = 2;
       else V2[moveIndex] = 2;
 
@@ -204,32 +182,16 @@ export default function DotsAndBoxesGame() {
       if (moveType === "horizontal") {
         const row = Math.floor(moveIndex / (DOTS - 1));
         const col = moveIndex % (DOTS - 1);
-        if (
-          row < DOTS - 1 &&
-          boxes[boxIndex(row, col, DOTS)] === 0 &&
-          sidesCount(row, col) === 3
-        )
+        if (row < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3)
           return true;
-        if (
-          row > 0 &&
-          boxes[boxIndex(row - 1, col, DOTS)] === 0 &&
-          sidesCount(row - 1, col) === 3
-        )
+        if (row > 0 && boxes[boxIndex(row - 1, col, DOTS)] === 0 && sidesCount(row - 1, col) === 3)
           return true;
       } else {
         const row = Math.floor(moveIndex / DOTS);
         const col = Math.floor(moveIndex % DOTS);
-        if (
-          col < DOTS - 1 &&
-          boxes[boxIndex(row, col, DOTS)] === 0 &&
-          sidesCount(row, col) === 3
-        )
+        if (col < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3)
           return true;
-        if (
-          col > 0 &&
-          boxes[boxIndex(row, col - 1, DOTS)] === 0 &&
-          sidesCount(row, col - 1) === 3
-        )
+        if (col > 0 && boxes[boxIndex(row, col - 1, DOTS)] === 0 && sidesCount(row, col - 1) === 3)
           return true;
       }
       return false;
@@ -240,6 +202,7 @@ export default function DotsAndBoxesGame() {
   // ---------- GAME CONTROL ----------
   const initializeGame = useCallback(() => {
     aiRunId.current++;
+    submittedRef.current = false; // new round not submitted yet
     setHorizontal(Array(DOTS * (DOTS - 1)).fill(0));
     setVertical(Array((DOTS - 1) * DOTS).fill(0));
     setBoxes(Array((DOTS - 1) * (DOTS - 1)).fill(0));
@@ -253,18 +216,62 @@ export default function DotsAndBoxesGame() {
     setHoverSeg(null);
   }, []);
 
+  // Update match result in game_player_stats
+  const updateMatchResult = useCallback(
+    async (winner) => {
+      if (!currentPlayerId || !gameId) return;
+      const { data: row, error: selErr } = await supabase
+        .from("game_player_stats")
+        .select("id, player_wins, ai_wins, total_games")
+        .eq("player_id", currentPlayerId)
+        .eq("game_id", gameId)
+        .maybeSingle();
+      if (selErr) throw selErr;
+
+      const incPlayer = winner === "Player" ? 1 : 0;
+      const incAI = winner === "AI" ? 1 : 0;
+
+      if (!row) {
+        await supabase.from("game_player_stats").insert({
+          player_id: currentPlayerId,
+          game_id: gameId,
+          player_wins: incPlayer,
+          ai_wins: incAI,
+          total_games: 1,
+        });
+      } else {
+        await supabase
+          .from("game_player_stats")
+          .update({
+            player_wins: (row.player_wins || 0) + incPlayer,
+            ai_wins: (row.ai_wins || 0) + incAI,
+            total_games: (row.total_games || 0) + 1,
+          })
+          .eq("id", row.id);
+      }
+    },
+    [currentPlayerId, gameId]
+  );
+
+  // End game (submit once)
   const endGame = useCallback(
-    (pScore, aScore) => {
+    async (pScore, aScore) => {
+      if (submittedRef.current) return;
+      submittedRef.current = true;
+
       aiRunId.current++;
       setGameState("gameover");
       const next = { ...winStats };
       let title = "";
+      let winner = "Draw";
       if (pScore > aScore) {
         next.wins++;
         title = "You won! 🏆";
+        winner = "Player";
       } else if (aScore > pScore) {
         next.losses++;
         title = "AI won! 🤖";
+        winner = "AI";
       } else {
         next.draws++;
         title = "It's a draw! 🤝";
@@ -273,9 +280,16 @@ export default function DotsAndBoxesGame() {
       saveStats(next);
 
       const finalScore = pScore * 10 + (pScore > aScore ? 20 : 0);
+
+      try {
+        await updateMatchResult(winner);
+      } catch (e) {
+        console.warn("Failed to update game_player_stats:", e);
+      }
+
       if (gameId) {
         try {
-          gameTracker.endGame(gameId, finalScore);
+          await gameTracker.endGame(gameId, finalScore, { winner });
         } catch {}
       }
 
@@ -288,7 +302,7 @@ export default function DotsAndBoxesGame() {
         ]
       );
     },
-    [winStats, saveStats, gameId, initializeGame]
+    [winStats, saveStats, gameId, initializeGame, updateMatchResult]
   );
 
   const checkGameOverAndEnd = useCallback(
@@ -306,15 +320,7 @@ export default function DotsAndBoxesGame() {
     [endGame]
   );
 
-  // ---------- SEGMENT PICKING (robust & unambiguous) ----------
-  /**
-   * Convert finger x/y (relative to inner board) to nearest segment.
-   * Rules:
-   *  1) Must be within AXIS_TOL of a grid line (horizontal or vertical).
-   *  2) If both axes are within tol, pick the one that's closer by > DECISION_GAP px.
-   *     If not, do nothing (prevents “wrong-axis” picks).
-   *  3) Must be within the segment extents between two dots (excludes beyond ends).
-   */
+  // ---------- SEGMENT PICKING ----------
   const pickSegment = useCallback(
     (x, y) => {
       // candidate horizontal line
@@ -327,7 +333,6 @@ export default function DotsAndBoxesGame() {
       const xLine = c * cell;
       const vAxisDist = Math.abs(x - xLine);
 
-      // within tolerance?
       const canH = r >= 0 && r <= DOTS - 1 && hAxisDist <= AXIS_TOL;
       const canV = c >= 0 && c <= DOTS - 1 && vAxisDist <= AXIS_TOL;
 
@@ -346,10 +351,7 @@ export default function DotsAndBoxesGame() {
         const minX = dot / 2;
         const maxX = boardInner - dot / 2;
         if (x < minX || x > maxX) return null;
-        const col = Math.min(
-          Math.max(0, Math.floor((x - minX) / cell)),
-          DOTS - 2
-        );
+        const col = Math.min(Math.max(0, Math.floor((x - minX) / cell)), DOTS - 2);
         const idx = hIndex(r, col, DOTS);
         return { type: "horizontal", index: idx };
       } else {
@@ -357,10 +359,7 @@ export default function DotsAndBoxesGame() {
         const minY = dot / 2;
         const maxY = boardInner - dot / 2;
         if (y < minY || y > maxY) return null;
-        const row = Math.min(
-          Math.max(0, Math.floor((y - minY) / cell)),
-          DOTS - 2
-        );
+        const row = Math.min(Math.max(0, Math.floor((y - minY) / cell)), DOTS - 2);
         const idx = vIndex(row, c, DOTS);
         return { type: "vertical", index: idx };
       }
@@ -379,11 +378,10 @@ export default function DotsAndBoxesGame() {
       const seg = pickSegment(locationX, locationY);
       if (!seg) return setHoverSeg(null);
 
-      // Don’t preview already-drawn segments
-      const drawn =
-        seg.type === "horizontal"
-          ? horizontal[seg.index] !== 0
-          : vertical[seg.index] !== 0;
+      const drawn = seg.type === "horizontal"
+        ? horizontal[seg.index] !== 0
+        : vertical[seg.index] !== 0;
+
       setHoverSeg(drawn ? null : seg);
     },
     [gameState, currentPlayer, pickSegment, horizontal, vertical]
@@ -418,9 +416,7 @@ export default function DotsAndBoxesGame() {
       else V[index] = 1;
 
       setLastMove({ type, index, player: 1 });
-      try {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      } catch {}
+      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
 
       const completed = countNewlyCompletedByMove(type, index, H, V);
       setHorizontal(H);
@@ -431,24 +427,13 @@ export default function DotsAndBoxesGame() {
         completed.forEach(({ index: bi }) => (B[bi] = 1));
         setBoxes(B);
         setPlayerScore((s) => s + completed.length);
-        try {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        } catch {}
+        try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
         if (checkGameOverAndEnd(B)) return; // keep turn
       } else {
         setCurrentPlayer(2);
       }
     },
-    [
-      gameState,
-      currentPlayer,
-      pickSegment,
-      horizontal,
-      vertical,
-      boxes,
-      countNewlyCompletedByMove,
-      checkGameOverAndEnd,
-    ]
+    [gameState, currentPlayer, pickSegment, horizontal, vertical, boxes, countNewlyCompletedByMove, checkGameOverAndEnd]
   );
 
   // ---------- AI MOVE ----------
@@ -464,12 +449,8 @@ export default function DotsAndBoxesGame() {
       const V = [...vertical];
 
       const moves = [];
-      H.forEach(
-        (d, i) => d === 0 && moves.push({ type: "horizontal", index: i })
-      );
-      V.forEach(
-        (d, i) => d === 0 && moves.push({ type: "vertical", index: i })
-      );
+      H.forEach((d, i) => d === 0 && moves.push({ type: "horizontal", index: i }));
+      V.forEach((d, i) => d === 0 && moves.push({ type: "vertical", index: i }));
       if (!moves.length) {
         const p = boxes.filter((b) => b === 1).length;
         const a = boxes.filter((b) => b === 2).length;
@@ -478,31 +459,24 @@ export default function DotsAndBoxesGame() {
       }
 
       // Prefer finishing, else avoid 3rd side, else random
-      let finishing = [],
-        max = 0;
+      let finishing = [], max = 0;
       for (const m of moves) {
-        const H2 = [...H],
-          V2 = [...V];
+        const H2 = [...H], V2 = [...V];
         if (m.type === "horizontal") H2[m.index] = 2;
         else V2[m.index] = 2;
         const done = countNewlyCompletedByMove(m.type, m.index, H2, V2).length;
         if (done > 0) {
-          if (done > max) {
-            max = done;
-            finishing = [m];
-          } else if (done === max) finishing.push(m);
+          if (done > max) { max = done; finishing = [m]; }
+          else if (done === max) finishing.push(m);
         }
       }
       let chosen;
-      if (finishing.length)
+      if (finishing.length) {
         chosen = finishing[Math.floor(Math.random() * finishing.length)];
-      else {
-        const safe = moves.filter(
-          (m) => !createsThirdSideForAnyBox(m.type, m.index, H, V)
-        );
-        chosen = (safe.length ? safe : moves)[
-          Math.floor(Math.random() * (safe.length ? safe.length : moves.length))
-        ];
+      } else {
+        const safe = moves.filter((m) => !createsThirdSideForAnyBox(m.type, m.index, H, V));
+        const pool = safe.length ? safe : moves;
+        chosen = pool[Math.floor(Math.random() * pool.length)];
       }
 
       const Hn = [...H];
@@ -514,20 +488,13 @@ export default function DotsAndBoxesGame() {
       setHorizontal(Hn);
       setVertical(Vn);
 
-      const gained = countNewlyCompletedByMove(
-        chosen.type,
-        chosen.index,
-        Hn,
-        Vn
-      );
+      const gained = countNewlyCompletedByMove(chosen.type, chosen.index, Hn, Vn);
       if (gained.length) {
         const B = [...boxes];
         gained.forEach(({ index: bi }) => (B[bi] = 2));
         setBoxes(B);
         setAiScore((s) => s + gained.length);
-        try {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-        } catch {}
+        try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
         if (checkGameOverAndEnd(B)) return;
         await new Promise((r) => setTimeout(r, 350));
         if (aiRunId.current !== myRun) return;
@@ -537,21 +504,47 @@ export default function DotsAndBoxesGame() {
       }
     };
     think();
-  }, [
-    gameState,
-    currentPlayer,
-    horizontal,
-    vertical,
-    boxes,
-    countNewlyCompletedByMove,
-    createsThirdSideForAnyBox,
-    checkGameOverAndEnd,
-    endGame,
-  ]);
+  }, [gameState, currentPlayer, horizontal, vertical, boxes, countNewlyCompletedByMove, createsThirdSideForAnyBox, checkGameOverAndEnd, endGame]);
 
   useEffect(() => {
     if (currentPlayer === 2 && gameState === "playing") makeAIMove();
   }, [currentPlayer, gameState, makeAIMove]);
+
+  // --------- FOCUS LIFECYCLE (reset + start / cancel on blur) ----------
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+
+      const start = async () => {
+        if (!currentPlayerId) return;
+        try {
+          const id = await getGameId(GAME_TYPES.DOTS_AND_BOXES);
+          if (!active) return;
+          setGameId(id);
+
+          // Reset board/timer on focus
+          initializeGame();
+
+          // Start tracking session
+          await gameTracker.startGame(id, currentPlayerId);
+        } catch (e) {
+          console.warn("startGame failed:", e);
+        }
+      };
+
+      start();
+
+      // On blur/unmount: cancel if not submitted
+      return () => {
+        active = false;
+        if (gameId && !submittedRef.current) {
+          try {
+            gameTracker.endGame(gameId, 0, { cancelled: true, reason: "blur" });
+          } catch {}
+        }
+      };
+    }, [currentPlayerId, gameId, initializeGame])
+  );
 
   // ---------- RENDER ----------
   const formatTime = useCallback((s) => {
@@ -562,58 +555,34 @@ export default function DotsAndBoxesGame() {
 
   if (!fontsLoaded) return null;
 
-  const lineColor = (owner) =>
-    owner === 1 ? PLAYER : owner === 2 ? AI : "transparent";
-  const lineGlow = (owner) =>
-    owner === 1 ? PLAYER_GLOW : owner === 2 ? AI_GLOW : "transparent";
-
   return (
     <View style={{ flex: 1 }}>
       <StatusBar style={isDark ? "light" : "dark"} />
       <NightSkyBackground />
 
       {/* Header */}
-      <View
-        style={{
-          paddingTop: insets.top + 16,
-          paddingHorizontal: 16,
-          marginBottom: 16,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 14,
-          }}
-        >
+      <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 16, marginBottom: 16 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
           <TouchableOpacity
-            onPress={() => router.back()}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
+            onPress={() => {
+              // back should end the session without submit if not completed
+              if (gameId && !submittedRef.current) {
+                try { gameTracker.endGame(gameId, 0, { cancelled: true, reason: "back" }); } catch {}
+              }
+              router.back();
             }}
+            style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
           >
             <ArrowLeft size={24} color={colors.text} />
           </TouchableOpacity>
-          <Text
-            style={{
-              fontFamily: "Inter_700Bold",
-              fontSize: 20,
-              color: colors.text,
-            }}
-          >
+
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: colors.text }}>
             Dots & Boxes
           </Text>
+
           <TouchableOpacity
             onPress={initializeGame}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
+            style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
           >
             <RotateCcw size={24} color={colors.text} />
           </TouchableOpacity>
@@ -624,88 +593,35 @@ export default function DotsAndBoxesGame() {
             intensity={isDark ? 60 : 80}
             tint={isDark ? "dark" : "light"}
             style={{
-              backgroundColor: isDark
-                ? "rgba(31,41,55,0.7)"
-                : "rgba(255,255,255,0.7)",
+              backgroundColor: isDark ? "rgba(31,41,55,0.7)" : "rgba(255,255,255,0.7)",
               borderWidth: 1,
               borderColor: colors.border,
               borderRadius: 16,
               padding: 14,
             }}
           >
-            <View
-              style={{
-                flexDirection: "row",
-                justifyContent: "space-around",
-                alignItems: "center",
-              }}
-            >
+            <View style={{ flexDirection: "row", justifyContent: "space-around", alignItems: "center" }}>
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>
                   You
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 20,
-                    color: currentPlayer === 1 ? PLAYER : colors.text,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: currentPlayer === 1 ? PLAYER : colors.text }}>
                   {playerScore}
                 </Text>
               </View>
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>
                   AI
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 20,
-                    color: currentPlayer === 2 ? AI : colors.text,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: currentPlayer === 2 ? AI : colors.text }}>
                   {aiScore}
                 </Text>
               </View>
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>
                   Time
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 16,
-                    color: colors.gameAccent3,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: colors.gameAccent3 }}>
                   {formatTime(timer)}
                 </Text>
               </View>
@@ -716,49 +632,20 @@ export default function DotsAndBoxesGame() {
 
       {/* Status */}
       <View style={{ paddingHorizontal: 16, marginBottom: 8 }}>
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 8,
-          }}
-        >
-          {gameState === "playing" && currentPlayer === 1 && (
-            <User size={18} color={PLAYER} />
-          )}
-          {gameState === "playing" && currentPlayer === 2 && (
-            <Bot size={18} color={AI} />
-          )}
-          <Text
-            style={{
-              fontFamily: "Inter_600SemiBold",
-              fontSize: 16,
-              color: colors.text,
-              textAlign: "center",
-            }}
-          >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          {gameState === "playing" && currentPlayer === 1 && <User size={18} color={PLAYER} />}
+          {gameState === "playing" && currentPlayer === 2 && <Bot size={18} color={AI} />}
+          <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 16, color: colors.text, textAlign: "center" }}>
             {gameState === "waiting" && "Tap 'New Game' to start!"}
-            {gameState === "playing" &&
-              currentPlayer === 1 &&
-              "Your turn — tap near an edge"}
-            {gameState === "playing" &&
-              currentPlayer === 2 &&
-              "AI is thinking..."}
+            {gameState === "playing" && currentPlayer === 1 && "Your turn — tap near an edge"}
+            {gameState === "playing" && currentPlayer === 2 && "AI is thinking..."}
             {gameState === "gameover" && "Game Over!"}
           </Text>
         </View>
       </View>
 
-      {/* Board (single responder, padding-free inner plane) */}
-      <View
-        style={{
-          flex: 1,
-          paddingHorizontal: 8,
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
+      {/* Board */}
+      <View style={{ flex: 1, paddingHorizontal: 8, justifyContent: "center", alignItems: "center" }}>
         <BlurView
           intensity={isDark ? 50 : 80}
           tint={isDark ? "dark" : "light"}
@@ -771,18 +658,11 @@ export default function DotsAndBoxesGame() {
             borderColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)",
           }}
         >
-          {/* Frame (visual padding only) */}
+          {/* Frame */}
           <View style={{ width: boardOuter, height: boardOuter }}>
-            {/* INNER BOARD — exact coordinate plane (0..boardInner) with NO padding */}
+            {/* INNER BOARD plane (no padding) */}
             <View
-              style={{
-                position: "absolute",
-                left: pad,
-                top: pad,
-                width: boardInner,
-                height: boardInner,
-              }}
-              // Single responder: local coords are guaranteed (no padding math)
+              style={{ position: "absolute", left: pad, top: pad, width: boardInner, height: boardInner }}
               onStartShouldSetResponder={() => true}
               onMoveShouldSetResponder={() => true}
               onResponderGrant={(e) => {
@@ -793,10 +673,9 @@ export default function DotsAndBoxesGame() {
                 const { locationX, locationY } = e.nativeEvent;
                 const seg = pickSegment(locationX, locationY);
                 if (!seg) return setHoverSeg(null);
-                const drawn =
-                  seg.type === "horizontal"
-                    ? horizontal[seg.index] !== 0
-                    : vertical[seg.index] !== 0;
+                const drawn = seg.type === "horizontal"
+                  ? horizontal[seg.index] !== 0
+                  : vertical[seg.index] !== 0;
                 setHoverSeg(drawn ? null : seg);
               }}
               onResponderMove={(e) => {
@@ -807,10 +686,9 @@ export default function DotsAndBoxesGame() {
                 const { locationX, locationY } = e.nativeEvent;
                 const seg = pickSegment(locationX, locationY);
                 if (!seg) return setHoverSeg(null);
-                const drawn =
-                  seg.type === "horizontal"
-                    ? horizontal[seg.index] !== 0
-                    : vertical[seg.index] !== 0;
+                const drawn = seg.type === "horizontal"
+                  ? horizontal[seg.index] !== 0
+                  : vertical[seg.index] !== 0;
                 setHoverSeg(drawn ? null : seg);
               }}
               onResponderRelease={(e) => {
@@ -823,7 +701,6 @@ export default function DotsAndBoxesGame() {
                 setHoverSeg(null);
                 if (!seg) return;
 
-                // If already drawn, ignore
                 if (
                   (seg.type === "horizontal" && horizontal[seg.index] !== 0) ||
                   (seg.type === "vertical" && vertical[seg.index] !== 0)
@@ -831,7 +708,6 @@ export default function DotsAndBoxesGame() {
                   return;
                 }
 
-                // Commit the closest segment to the tap
                 const type = seg.type;
                 const index = seg.index;
                 const H = [...horizontal];
@@ -841,9 +717,7 @@ export default function DotsAndBoxesGame() {
                 else V[index] = 1;
 
                 setLastMove({ type, index, player: 1 });
-                try {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                } catch {}
+                try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
 
                 const completed = countNewlyCompletedByMove(type, index, H, V);
                 setHorizontal(H);
@@ -854,18 +728,14 @@ export default function DotsAndBoxesGame() {
                   completed.forEach(({ index: bi }) => (B[bi] = 1));
                   setBoxes(B);
                   setPlayerScore((s) => s + completed.length);
-                  try {
-                    Haptics.notificationAsync(
-                      Haptics.NotificationFeedbackType.Success
-                    );
-                  } catch {}
+                  try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
                   if (checkGameOverAndEnd(B)) return; // keep turn
                 } else {
                   setCurrentPlayer(2);
                 }
               }}
             >
-              {/* ----- DOTS ----- */}
+              {/* DOTS */}
               {Array.from({ length: DOTS }).map((_, r) =>
                 Array.from({ length: DOTS }).map((__, c) => (
                   <View
@@ -888,35 +758,17 @@ export default function DotsAndBoxesGame() {
                 ))
               )}
 
-              {/* ----- HORIZONTAL tracks + lines ----- */}
+              {/* HORIZONTAL tracks + lines */}
               {Array.from({ length: DOTS }).map((_, r) =>
                 Array.from({ length: DOTS - 1 }).map((__, c) => {
                   const idx = hIndex(r, c, DOTS);
                   const owner = horizontal[idx];
-                  const isLast =
-                    lastMove?.type === "horizontal" && lastMove?.index === idx;
-                  const isHover =
-                    hoverSeg?.type === "horizontal" && hoverSeg?.index === idx;
+                  const isLast = lastMove?.type === "horizontal" && lastMove?.index === idx;
+                  const isHover = hoverSeg?.type === "horizontal" && hoverSeg?.index === idx;
 
                   return (
-                    <View
-                      key={`h-${r}-${c}`}
-                      style={{
-                        position: "absolute",
-                        left: c * cell + dot / 2,
-                        top: r * cell - line / 2,
-                      }}
-                    >
-                      {/* track */}
-                      <View
-                        style={{
-                          width: cell - dot,
-                          height: track,
-                          borderRadius: track / 2,
-                          backgroundColor: TRACK,
-                        }}
-                      />
-                      {/* stroke */}
+                    <View key={`h-${r}-${c}`} style={{ position: "absolute", left: c * cell + dot / 2, top: r * cell - line / 2 }}>
+                      <View style={{ width: cell - dot, height: track, borderRadius: track / 2, backgroundColor: TRACK }} />
                       <View
                         style={{
                           position: "absolute",
@@ -924,18 +776,8 @@ export default function DotsAndBoxesGame() {
                           width: cell - dot,
                           height: line,
                           borderRadius: line / 2,
-                          backgroundColor: owner
-                            ? owner === 1
-                              ? PLAYER
-                              : AI
-                            : isHover
-                            ? "rgba(96,165,250,0.22)"
-                            : "transparent",
-                          shadowColor: isLast
-                            ? owner === 1
-                              ? PLAYER_GLOW
-                              : AI_GLOW
-                            : "transparent",
+                          backgroundColor: owner ? (owner === 1 ? PLAYER : AI) : isHover ? "rgba(96,165,250,0.22)" : "transparent",
+                          shadowColor: isLast ? (owner === 1 ? PLAYER_GLOW : AI_GLOW) : "transparent",
                           shadowOffset: { width: 0, height: 0 },
                           shadowOpacity: isLast ? 0.9 : 0,
                           shadowRadius: isLast ? 6 : 0,
@@ -947,35 +789,17 @@ export default function DotsAndBoxesGame() {
                 })
               )}
 
-              {/* ----- VERTICAL tracks + lines ----- */}
+              {/* VERTICAL tracks + lines */}
               {Array.from({ length: DOTS - 1 }).map((_, r) =>
                 Array.from({ length: DOTS }).map((__, c) => {
                   const idx = vIndex(r, c, DOTS);
                   const owner = vertical[idx];
-                  const isLast =
-                    lastMove?.type === "vertical" && lastMove?.index === idx;
-                  const isHover =
-                    hoverSeg?.type === "vertical" && hoverSeg?.index === idx;
+                  const isLast = lastMove?.type === "vertical" && lastMove?.index === idx;
+                  const isHover = hoverSeg?.type === "vertical" && hoverSeg?.index === idx;
 
                   return (
-                    <View
-                      key={`v-${r}-${c}`}
-                      style={{
-                        position: "absolute",
-                        left: c * cell - line / 2,
-                        top: r * cell + dot / 2,
-                      }}
-                    >
-                      {/* track */}
-                      <View
-                        style={{
-                          width: track,
-                          height: cell - dot,
-                          borderRadius: track / 2,
-                          backgroundColor: TRACK,
-                        }}
-                      />
-                      {/* stroke */}
+                    <View key={`v-${r}-${c}`} style={{ position: "absolute", left: c * cell - line / 2, top: r * cell + dot / 2 }}>
+                      <View style={{ width: track, height: cell - dot, borderRadius: track / 2, backgroundColor: TRACK }} />
                       <View
                         style={{
                           position: "absolute",
@@ -983,18 +807,8 @@ export default function DotsAndBoxesGame() {
                           width: line,
                           height: cell - dot,
                           borderRadius: line / 2,
-                          backgroundColor: owner
-                            ? owner === 1
-                              ? PLAYER
-                              : AI
-                            : isHover
-                            ? "rgba(96,165,250,0.22)"
-                            : "transparent",
-                          shadowColor: isLast
-                            ? owner === 1
-                              ? PLAYER_GLOW
-                              : AI_GLOW
-                            : "transparent",
+                          backgroundColor: owner ? (owner === 1 ? PLAYER : AI) : isHover ? "rgba(96,165,250,0.22)" : "transparent",
+                          shadowColor: isLast ? (owner === 1 ? PLAYER_GLOW : AI_GLOW) : "transparent",
                           shadowOffset: { width: 0, height: 0 },
                           shadowOpacity: isLast ? 0.9 : 0,
                           shadowRadius: isLast ? 6 : 0,
@@ -1006,7 +820,7 @@ export default function DotsAndBoxesGame() {
                 })
               )}
 
-              {/* ----- BOXES ----- */}
+              {/* BOXES */}
               {Array.from({ length: DOTS - 1 }).map((_, r) =>
                 Array.from({ length: DOTS - 1 }).map((__, c) => {
                   const bi = boxIndex(r, c, DOTS);
@@ -1016,35 +830,21 @@ export default function DotsAndBoxesGame() {
                       key={`box-${r}-${c}`}
                       style={{
                         position: "absolute",
-                        left: c * cell + dot / 2 + line * 0.75, // shrunk background
+                        left: c * cell + dot / 2 + line * 0.75,
                         top: r * cell + dot / 2 + line * 0.75,
                         width: cell - dot - line * 1.5,
                         height: cell - dot - line * 1.5,
                         borderRadius: 8,
                         justifyContent: "center",
                         alignItems: "center",
-                        backgroundColor:
-                          owner === 1
-                            ? BOX_BG_YOU
-                            : owner === 2
-                            ? BOX_BG_AI
-                            : "transparent",
+                        backgroundColor: owner === 1 ? BOX_BG_YOU : owner === 2 ? BOX_BG_AI : "transparent",
                         borderWidth: owner ? 1.5 : 0,
-                        borderColor:
-                          owner === 1
-                            ? BOX_BORDER_YOU
-                            : owner === 2
-                            ? BOX_BORDER_AI
-                            : "transparent",
+                        borderColor: owner === 1 ? BOX_BORDER_YOU : owner === 2 ? BOX_BORDER_AI : "transparent",
                       }}
                     >
                       {owner !== 0 && (
                         <LinearGradient
-                          colors={[
-                            "rgba(255,255,255,0.14)",
-                            "rgba(255,255,255,0.04)",
-                            "transparent",
-                          ]}
+                          colors={["rgba(255,255,255,0.14)", "rgba(255,255,255,0.04)", "transparent"]}
                           style={{
                             position: "absolute",
                             top: 0,
@@ -1066,13 +866,7 @@ export default function DotsAndBoxesGame() {
                             opacity: 0.95,
                           }}
                         >
-                          <Text
-                            style={{
-                              fontFamily: "Inter_700Bold",
-                              fontSize: 11,
-                              color: "white",
-                            }}
-                          >
+                          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 11, color: "white" }}>
                             {owner === 1 ? "P" : "C"}
                           </Text>
                         </View>
@@ -1082,7 +876,7 @@ export default function DotsAndBoxesGame() {
                 })
               )}
 
-              {/* HOVER PREVIEW OVERLAY (optional extra glow) */}
+              {/* HOVER PREVIEW */}
               {hoverSeg && (
                 <View
                   pointerEvents="none"
@@ -1094,8 +888,7 @@ export default function DotsAndBoxesGame() {
                         : Math.floor(hoverSeg.index % DOTS) * cell - line / 2,
                     top:
                       hoverSeg.type === "horizontal"
-                        ? Math.floor(hoverSeg.index / (DOTS - 1)) * cell -
-                          line / 2
+                        ? Math.floor(hoverSeg.index / (DOTS - 1)) * cell - line / 2
                         : Math.floor(hoverSeg.index / DOTS) * cell + dot / 2,
                     width: hoverSeg.type === "horizontal" ? cell - dot : line,
                     height: hoverSeg.type === "horizontal" ? line : cell - dot,
@@ -1130,24 +923,12 @@ export default function DotsAndBoxesGame() {
               }}
             >
               <Play size={20} color="white" />
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 16,
-                  color: "white",
-                }}
-              >
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: "white" }}>
                 New Game
               </Text>
             </TouchableOpacity>
             <View style={{ marginTop: 8 }}>
-              <Text
-                style={{
-                  fontFamily: "Inter_500Medium",
-                  fontSize: 14,
-                  color: colors.textSecondary,
-                }}
-              >
+              <Text style={{ fontFamily: "Inter_500Medium", fontSize: 14, color: colors.textSecondary }}>
                 Record: {winStats.wins}W-{winStats.losses}L-{winStats.draws}D
               </Text>
             </View>

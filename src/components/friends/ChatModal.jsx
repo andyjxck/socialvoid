@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
+// src/components/friends/ChatModal.jsx
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import {
   View,
   Text,
@@ -18,68 +19,192 @@ import {
   Inter_400Regular,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabase } from "../../utils/supabase";
 
 export default function ChatModal({ visible, onClose, friend, playerId }) {
   const { colors } = useTheme();
   const queryClient = useQueryClient();
   const scrollViewRef = useRef(null);
   const [chatMessage, setChatMessage] = useState("");
-  const [fontsLoaded] = useFonts({
-    Inter_400Regular,
-    Inter_700Bold,
-  });
+  const [fontsLoaded] = useFonts({ Inter_400Regular, Inter_700Bold });
 
-  const { data: chatMessages = [] } = useQuery({
-    queryKey: ["chat-messages", playerId, friend?.id],
+  /* ─────────────────────────────────────────────
+     1) Resolve YOUR player id (pid)
+     - If prop missing, load from AsyncStorage
+     ───────────────────────────────────────────── */
+  const [pidFromStorage, setPidFromStorage] = useState(null);
+  useEffect(() => {
+    if (playerId != null) return; // we already have it
+    (async () => {
+      const v = await AsyncStorage.getItem("puzzle_hub_player_id");
+      if (v != null) {
+        const n = parseInt(String(v), 10);
+        if (!Number.isNaN(n)) setPidFromStorage(n);
+      }
+    })();
+  }, [playerId]);
+
+  const pidRaw = playerId ?? pidFromStorage ?? null;
+
+  /* ─────────────────────────────────────────────
+     2) Resolve FRIEND player id (fid)
+     - Try friend.id
+     - Try friend.player_id
+     - Try lookup by user_id
+     - Try lookup by username
+     ───────────────────────────────────────────── */
+  const friendIdHint =
+    friend?.id ??
+    friend?.player_id ??
+    null;
+
+  const friendUserId = friend?.user_id ?? null;
+  const friendUsername = friend?.username ?? null;
+
+  // a) resolve by user_id if we don't have a direct id
+  const { data: fidByUser } = useQuery({
+    queryKey: ["chat:resolve-fid:user_id", friendUserId],
+    enabled: !friendIdHint && !!friendUserId && !!visible,
     queryFn: async () => {
-      if (!playerId || !friend?.id) return [];
-      const response = await fetch(
-        `/api/chat?playerId=${playerId}&friendId=${friend.id}`,
-      );
-      if (!response.ok) {
-        throw new Error("Failed to fetch messages");
-      }
-      return response.json();
+      const { data, error } = await supabase
+        .from("players")
+        .select("id")
+        .eq("user_id", friendUserId)
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data?.id ?? null;
     },
-    enabled: !!playerId && !!friend && visible,
-    refetchInterval: visible ? 1000 : false, // Poll every second when visible
-    refetchIntervalInBackground: false,
+    staleTime: 60_000,
   });
 
-  const sendMessageMutation = useMutation({
-    mutationFn: async (message) => {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          senderId: playerId,
-          receiverId: friend.id,
-          message,
-        }),
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to send message");
+  // b) resolve by username if still no id (last resort; usernames are not guaranteed unique unless you enforce it)
+  const { data: fidByUsername } = useQuery({
+    queryKey: ["chat:resolve-fid:username", friendUsername],
+    enabled:
+      !friendIdHint && !fidByUser && !!friendUsername && !!visible,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("players")
+        .select("id")
+        .ilike("username", friendUsername) // exact match preferred; change to .eq if you enforce uniqueness
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data?.id ?? null;
+    },
+    staleTime: 60_000,
+  });
+
+  const fidRaw = friendIdHint ?? fidByUser ?? fidByUsername ?? null;
+
+  // Helpful debug (kept tiny)
+  useEffect(() => {
+    if (!visible) return;
+    // eslint-disable-next-line no-console
+    console.log("[ChatModal] ids", { pidRaw, fidRaw, friend });
+  }, [visible, pidRaw, fidRaw, friend]);
+
+  /* ─────────────────────────────────────────────
+     3) Normalize ids at the LAST moment (for DB insert)
+     ───────────────────────────────────────────── */
+  const pid = useMemo(() => {
+    if (pidRaw == null) return null;
+    const n = parseInt(String(pidRaw), 10);
+    return Number.isNaN(n) ? null : n;
+  }, [pidRaw]);
+
+  const fid = useMemo(() => {
+    if (fidRaw == null) return null;
+    const n = parseInt(String(fidRaw), 10);
+    return Number.isNaN(n) ? null : n;
+  }, [fidRaw]);
+
+  /* ─────────────────────────────────────────────
+     4) Load messages
+     ───────────────────────────────────────────── */
+  const { data: chatMessages = [] } = useQuery({
+    queryKey: ["chat-messages", pid, fid],
+    enabled: Boolean(pid && fid && visible),
+    refetchInterval: visible ? 1000 : false,
+    refetchIntervalInBackground: false,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("id, sender_id, receiver_id, message, is_read, created_at")
+        .or(
+          `and(sender_id.eq.${pid},receiver_id.eq.${fid}),and(sender_id.eq.${fid},receiver_id.eq.${pid})`
+        )
+        .order("created_at", { ascending: true })
+        .limit(500);
+
+      if (error) throw error;
+
+      // Mark unread incoming as read (fire-and-forget)
+      const hasUnread = (data || []).some(
+        (m) => m.receiver_id === pid && m.is_read === false
+      );
+      if (hasUnread) {
+        supabase
+          .from("chat_messages")
+          .update({ is_read: true })
+          .eq("receiver_id", pid)
+          .eq("sender_id", fid)
+          .eq("is_read", false);
       }
-      return response.json();
+
+      return data || [];
+    },
+  });
+
+  /* ─────────────────────────────────────────────
+     5) Send message
+     ───────────────────────────────────────────── */
+  const sendMessageMutation = useMutation({
+    mutationFn: async (messageText) => {
+      const text = (messageText || "").trim();
+      if (!pid || !fid || !text) {
+        // eslint-disable-next-line no-console
+        console.log("[ChatModal] blocked send", { pid, fid, textLength: text.length });
+        throw new Error("Invalid message");
+      }
+
+      const { error } = await supabase.from("chat_messages").insert({
+        sender_id: pid,
+        receiver_id: fid,
+        message: text,
+        is_read: false,
+        created_at: new Date().toISOString(),
+      });
+
+      if (error) throw error;
+      return true;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["chat-messages", playerId, friend?.id]);
       setChatMessage("");
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      queryClient.invalidateQueries({ queryKey: ["chat-messages", pid, fid] });
+      setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 120);
     },
-    onError: (error) => {
-      console.error("Failed to send message:", error);
-      // Could show an error indicator here
+    onError: (err) => {
+      // eslint-disable-next-line no-console
+      console.error("[ChatModal] Failed to send:", err);
     },
   });
 
+  const canSend = Boolean(pid && fid && chatMessage.trim() && !sendMessageMutation.isLoading);
+
   const sendMessage = () => {
-    if (!chatMessage.trim() || sendMessageMutation.isLoading) return;
-    sendMessageMutation.mutate(chatMessage.trim());
+    if (!canSend) return;
+    sendMessageMutation.mutate(chatMessage);
   };
 
-  // Auto-scroll to bottom when new messages arrive
+  /* ─────────────────────────────────────────────
+     6) Auto-scroll
+     ───────────────────────────────────────────── */
   useEffect(() => {
     if (chatMessages.length > 0 && scrollViewRef.current) {
       setTimeout(() => {
@@ -88,17 +213,10 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
     }
   }, [chatMessages.length]);
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  if (!fontsLoaded) return null;
 
   return (
-    <Modal
-      visible={visible}
-      transparent={true}
-      animationType="slide"
-      onRequestClose={onClose}
-    >
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
@@ -113,6 +231,7 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
               borderTopRightRadius: 20,
             }}
           >
+            {/* Header */}
             <View
               style={{
                 padding: 20,
@@ -127,7 +246,6 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
                 <Text
                   style={{
                     fontSize: 18,
-                    fontWeight: "700",
                     color: colors.text,
                     fontFamily: "Inter_700Bold",
                   }}
@@ -149,23 +267,14 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
               </TouchableOpacity>
             </View>
 
+            {/* Messages */}
             <ScrollView
               ref={scrollViewRef}
               style={{ flex: 1, padding: 16 }}
               showsVerticalScrollIndicator={false}
-              onContentSizeChange={() => {
-                scrollViewRef.current?.scrollToEnd({ animated: true });
-              }}
             >
               {chatMessages.length === 0 ? (
-                <View
-                  style={{
-                    flex: 1,
-                    justifyContent: "center",
-                    alignItems: "center",
-                    paddingVertical: 40,
-                  }}
-                >
+                <View style={{ alignItems: "center", paddingVertical: 40 }}>
                   <Text
                     style={{
                       fontSize: 16,
@@ -178,16 +287,14 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
                   </Text>
                 </View>
               ) : (
-                chatMessages.map((message, index) => (
+                chatMessages.map((message) => (
                   <View
-                    key={message.id || index}
+                    key={message.id}
                     style={{
                       alignSelf:
-                        message.sender_id === playerId
-                          ? "flex-end"
-                          : "flex-start",
+                        message.sender_id === pid ? "flex-end" : "flex-start",
                       backgroundColor:
-                        message.sender_id === playerId
+                        message.sender_id === pid
                           ? colors.gameAccent1
                           : colors.glassSecondary,
                       borderRadius: 12,
@@ -200,9 +307,7 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
                     <Text
                       style={{
                         color:
-                          message.sender_id === playerId
-                            ? "#FFFFFF"
-                            : colors.text,
+                          message.sender_id === pid ? "#FFFFFF" : colors.text,
                         fontSize: 14,
                         fontFamily: "Inter_400Regular",
                       }}
@@ -212,7 +317,7 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
                     <Text
                       style={{
                         color:
-                          message.sender_id === playerId
+                          message.sender_id === pid
                             ? "#FFFFFF80"
                             : colors.textSecondary,
                         fontSize: 10,
@@ -230,6 +335,7 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
               )}
             </ScrollView>
 
+            {/* Composer */}
             <View
               style={{
                 padding: 16,
@@ -262,15 +368,12 @@ export default function ChatModal({ visible, onClose, friend, playerId }) {
               />
               <TouchableOpacity
                 onPress={sendMessage}
-                disabled={!chatMessage.trim() || sendMessageMutation.isLoading}
+                disabled={!canSend}
                 style={{
                   backgroundColor: colors.gameAccent1,
                   borderRadius: 20,
                   padding: 10,
-                  opacity:
-                    !chatMessage.trim() || sendMessageMutation.isLoading
-                      ? 0.5
-                      : 1,
+                  opacity: canSend ? 1 : 0.5,
                 }}
               >
                 <Send size={16} color="#FFFFFF" />

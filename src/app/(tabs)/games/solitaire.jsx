@@ -1,3 +1,4 @@
+// src/app/(tabs)/games/solitaire.jsx
 import React, { useState, useEffect, useRef } from "react";
 import { View, ScrollView, Text } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -20,6 +21,7 @@ import { Instructions } from "../../../components/solitaire/Instructions";
 export default function SolitaireGame() {
   const insets = useSafeAreaInsets();
   const { isDark, colors } = useTheme();
+
   const {
     game,
     resetGame,
@@ -34,93 +36,156 @@ export default function SolitaireGame() {
     tryAutoPlaceInSafeZone,
   } = useSolitaireGame();
 
+  // IDs
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+
+  // run/session control
   const gameStartedRef = useRef(false);
   const currentGameIdRef = useRef(null);
+  const submittedRef = useRef(false); // prevent double endGame
 
-  // Handle double-tap to auto-place cards in safe zone
+  // local high score cache (to gate sending high_score)
+  const [bestLocalScore, setBestLocalScore] = useState(0);
+  const bestLocalRef = useRef(0);
+  useEffect(() => {
+    bestLocalRef.current = bestLocalScore;
+  }, [bestLocalScore]);
+
+  // Load cached best score
+  useEffect(() => {
+    const loadBest = async () => {
+      try {
+        const saved = await AsyncStorage.getItem("solitaire_scores");
+        if (saved) {
+          const { best = 0 } = JSON.parse(saved);
+          setBestLocalScore(best);
+        }
+      } catch {}
+    };
+    loadBest();
+  }, []);
+
+  const saveBestLocal = async (best) => {
+    try {
+      await AsyncStorage.setItem("solitaire_scores", JSON.stringify({ best }));
+    } catch {}
+  };
+
+  // Track latest score via ref for safe reads on unmount
+  const scoreRef = useRef(0);
+  useEffect(() => {
+    scoreRef.current = game?.score || 0;
+  }, [game.score]);
+
+  // Double tap helper
   const handleCardDoublePress = (card, source, cardIndex) => {
     tryAutoPlaceInSafeZone(card, source, cardIndex);
   };
 
-  // Enhanced reset function that properly ends and starts a new game
-  const handleReset = async () => {
-    // End current game if one is active
-    if (currentGameIdRef.current && gameStartedRef.current) {
-      await gameTracker.endGame(currentGameIdRef.current, 0); // 0 score for reset
-      gameStartedRef.current = false;
-    }
+  // Persistent submit helper; attaches high_score only if beating local best
+  const submitPersistent = async (finalScore, reason) => {
+    if (!gameId || !currentGameIdRef.current || submittedRef.current) return;
+    try {
+      const meta = {
+        result: reason === "win" ? "win" : "play",
+        reason,
+      };
+      if (finalScore > bestLocalRef.current) {
+        meta.high_score = finalScore;
+      }
+      await gameTracker.endGame(currentGameIdRef.current, finalScore, meta);
+      submittedRef.current = true;
 
-    // Reset the game
-    resetGame();
-
-    // Start new game tracking
-    if (currentPlayerId && gameId) {
-      await gameTracker.startGame(gameId, currentPlayerId);
-      gameStartedRef.current = true;
-      currentGameIdRef.current = gameId;
+      if (finalScore > bestLocalRef.current) {
+        setBestLocalScore(finalScore);
+        saveBestLocal(finalScore);
+      }
+    } catch (e) {
+      // keep quiet but guard prevents double spam
+      // console.warn("Solitaire submitPersistent failed:", e?.message || e);
     }
   };
 
+  // Reset handler: end current run as a play, then start a new run
+  const handleReset = async () => {
+    if (currentGameIdRef.current && gameStartedRef.current) {
+      await submitPersistent(scoreRef.current, "reset");
+      gameStartedRef.current = false;
+    }
+
+    // Reset local board state
+    resetGame();
+    submittedRef.current = false;
+
+    // Start new tracking run
+    if (currentPlayerId && gameId) {
+      try {
+        await gameTracker.startGame(gameId, currentPlayerId);
+        gameStartedRef.current = true;
+        currentGameIdRef.current = gameId;
+      } catch {}
+    }
+  };
+
+  // Load player id once
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId) : 1);
+        const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId, 10) : 1);
       } catch (error) {
-        console.error("Failed to load player ID:", error);
         setCurrentPlayerId(1);
       }
     };
     loadPlayerId();
   }, []);
 
-  // Initial game setup - only runs once when player ID is loaded
+  // Initial game setup - start a tracking run
   useEffect(() => {
     let mounted = true;
-
     const setupInitialGame = async () => {
       if (!currentPlayerId || gameStartedRef.current) return;
 
-      const id = await getGameId(GAME_TYPES.SOLITAIRE);
-      if (id && currentPlayerId && mounted) {
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        gameStartedRef.current = true;
-        currentGameIdRef.current = id;
-      }
+      try {
+        const id = await getGameId(GAME_TYPES.SOLITAIRE);
+        if (!mounted) return;
+        if (id) {
+          setGameId(id);
+          await gameTracker.startGame(id, currentPlayerId);
+          gameStartedRef.current = true;
+          currentGameIdRef.current = id;
+          submittedRef.current = false;
+        }
+      } catch {}
     };
 
     setupInitialGame();
-
     return () => {
       mounted = false;
     };
   }, [currentPlayerId]);
 
-  // Check for game completion
+  // Watch for completion (all foundations full)
   useEffect(() => {
     const isGameWon = game.foundations.every((f) => f.length === 13);
-
     if (isGameWon && gameStartedRef.current && currentGameIdRef.current) {
-      // Game won! End with score
-      gameTracker.endGame(currentGameIdRef.current, Math.max(100, game.score));
+      // end as win; include high_score only if higher
+      submitPersistent(Math.max(100, game.score), "win");
       gameStartedRef.current = false;
-      currentGameIdRef.current = null;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.foundations, game.score]);
 
-  // Cleanup on unmount
+  // Submit on unmount as a play (not a win)
   useEffect(() => {
     return () => {
-      if (currentGameIdRef.current && gameStartedRef.current) {
-        // End game when component unmounts (player leaves)
-        gameTracker.endGame(currentGameIdRef.current, game.score);
+      if (currentGameIdRef.current && gameStartedRef.current && !submittedRef.current) {
+        submitPersistent(scoreRef.current, "unmount");
+        gameStartedRef.current = false;
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -135,11 +200,7 @@ export default function SolitaireGame() {
           marginBottom: 20,
         }}
       >
-        <GameHeader
-          onReset={handleReset}
-          onUndo={undoLastMove}
-          canUndo={canUndo}
-        />
+        <GameHeader onReset={handleReset} onUndo={undoLastMove} canUndo={canUndo} />
         <GameStats
           score={game.score}
           moves={game.moves}
@@ -171,7 +232,7 @@ export default function SolitaireGame() {
         <Instructions />
       </ScrollView>
 
-      {/* Auto-completion indicator */}
+      {/* Auto-completing overlay */}
       {isAutoCompleting && (
         <View
           style={{

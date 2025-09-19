@@ -5,30 +5,91 @@ import PlayerCard from "./PlayerCard";
 import { useTheme } from "../../utils/theme";
 import { Search } from "lucide-react-native";
 import { useFonts, Inter_400Regular } from "@expo-google-fonts/inter";
+import { supabase } from "../../utils/supabase";
 
 export default function AddFriend({ playerId, onAddFriend, isAddingFriend }) {
   const { colors } = useTheme();
   const [searchQuery, setSearchQuery] = useState("");
   const [fontsLoaded] = useFonts({ Inter_400Regular });
 
-  const { data: searchResults = [], isLoading: searchLoading } = useQuery({
-    queryKey: ["player-search", searchQuery, playerId],
+  const pid = Number(playerId) || 0;
+
+  // 👥 load my friends (accepted)
+  const { data: friends = [] } = useQuery({
+    queryKey: ["friends-ids", pid],
+    enabled: !!pid,
     queryFn: async () => {
-      if (!searchQuery || searchQuery.length < 1) return [];
-      const response = await fetch(
-        `/api/players/search?q=${encodeURIComponent(
-          searchQuery,
-        )}&playerId=${playerId}`,
-      );
-      if (!response.ok) return [];
-      return response.json();
+      // accepted friendships where I'm either side
+      const { data: fships, error } = await supabase
+        .from("friendships")
+        .select("player1_id, player2_id, status")
+        .or(`player1_id.eq.${pid},player2_id.eq.${pid}`)
+        .eq("status", "accepted");
+
+      if (error) throw error;
+
+      const ids =
+        fships?.map((f) => (f.player1_id === pid ? f.player2_id : f.player1_id)) || [];
+      return ids.map((n) => Number(n)).filter((n) => Number.isFinite(n));
     },
-    enabled: !!searchQuery && searchQuery.length >= 1,
   });
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  // 📨 load pending requests (either direction)
+  const { data: pendingWith = [] } = useQuery({
+    queryKey: ["friend-pending-ids", pid],
+    enabled: !!pid,
+    queryFn: async () => {
+      // pending requests where I'm sender or receiver
+      const { data: reqs, error } = await supabase
+        .from("friend_requests")
+        .select("sender_id, receiver_id, status")
+        .or(`sender_id.eq.${pid},receiver_id.eq.${pid}`)
+        .eq("status", "pending");
+
+      if (error) throw error;
+
+      const ids =
+        reqs?.map((r) => (r.sender_id === pid ? r.receiver_id : r.sender_id)) || [];
+      return ids.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+    },
+  });
+
+  // 🔎 search players (username ilike OR numeric id), exclude me
+  const { data: searchResults = [], isLoading: searchLoading } = useQuery({
+    queryKey: ["player-search", searchQuery, pid],
+    enabled: !!searchQuery && searchQuery.trim().length >= 1,
+    queryFn: async () => {
+      const q = searchQuery.trim();
+      let query = supabase
+        .from("players")
+        .select("id, username, profile_emoji")
+        .neq("id", pid)
+        .order("username", { ascending: true })
+        .limit(25);
+
+      const numericId = /^\d+$/.test(q) ? Number(q) : null;
+
+      if (numericId !== null) {
+        // match by id OR username contains q
+        // NOTE: .or() uses comma-separated conditions
+        query = query.or(`id.eq.${numericId},username.ilike.*${q}*`);
+      } else {
+        query = query.ilike("username", `%${q}%`);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+      return data || [];
+    },
+  });
+
+  if (!fontsLoaded) return null;
+
+  // helper: already friend or pending -> disable add
+  const isBlocked = (id) => {
+    const n = Number(id);
+    return friends.includes(n) || pendingWith.includes(n);
+  };
 
   return (
     <View>
@@ -62,7 +123,7 @@ export default function AddFriend({ playerId, onAddFriend, isAddingFriend }) {
         </View>
       </View>
 
-      {searchQuery.length < 1 ? (
+      {(!searchQuery || searchQuery.trim().length < 1) ? (
         <Text
           style={{
             textAlign: "center",
@@ -103,7 +164,7 @@ export default function AddFriend({ playerId, onAddFriend, isAddingFriend }) {
           <PlayerCard
             key={player.id}
             player={player}
-            isFriend={false}
+            isFriend={isBlocked(player.id)}          // block add if friend or pending
             onAddFriend={onAddFriend}
             isAddingFriend={isAddingFriend}
           />

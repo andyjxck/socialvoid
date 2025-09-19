@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -26,60 +26,68 @@ import {
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+
 const { width: screenWidth } = Dimensions.get("window");
+const BEST_TIME_KEY = "memory_match_best_time";
 
 export default function MemoryMatchGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
-  const [currentPlayerId, setCurrentPlayerId] = useState(null);
-  const [gameId, setGameId] = useState(null);
 
-  // Get player ID from AsyncStorage
+  // ---- tracking ids (safe, numeric) ----
+  const [currentPlayerId, setCurrentPlayerId] = useState(null);
+  const [gameTypeId, setGameTypeId] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const submittedRef = useRef(false);
+
+  // Get player id
   useEffect(() => {
-    const loadPlayerId = async () => {
+    (async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch {
         setCurrentPlayerId(1);
       }
-    };
-    loadPlayerId();
+    })();
   }, []);
 
-  // Get the correct game ID and start tracking
+  // Start a session when we have player id
   useEffect(() => {
     let mounted = true;
-    let currentGameId = null;
+    let localSessionId = null;
 
-    const setupGame = async () => {
+    const start = async () => {
       if (!currentPlayerId) return;
-
-      const id = await getGameId(GAME_TYPES.MEMORY_MATCH);
-      if (id && currentPlayerId && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Memory Match tracking started:", id);
-      } else if (mounted) {
-        console.error("❌ Could not get Memory Match game ID or player ID");
+      try {
+        const id = await getGameId(GAME_TYPES.MEMORY_MATCH); // must be numeric
+        if (!mounted) return;
+        if (typeof id !== "number") {
+          console.warn("getGameId did not return a number for MEMORY_MATCH:", id);
+          return;
+        }
+        setGameTypeId(id);
+        const started = await gameTracker.startGame(id, currentPlayerId);
+        localSessionId = started ?? id; // in case your tracker returns a run id
+        setSessionId(localSessionId);
+        submittedRef.current = false;
+      } catch (e) {
+        console.warn("Memory Match: startGame failed", e);
       }
     };
 
-    setupGame();
+    start();
 
-    // Cleanup when component unmounts or effect re-runs
+    // cancel on unmount if not submitted
     return () => {
       mounted = false;
-      if (currentGameId) {
-        gameTracker.endGame(currentGameId, 0);
+      if (localSessionId && !submittedRef.current) {
+        try {
+          gameTracker.endGame(localSessionId, 0, {
+            cancelled: true,
+            reason: "unmount",
+          });
+        } catch {}
       }
     };
   }, [currentPlayerId]);
@@ -91,21 +99,22 @@ export default function MemoryMatchGame() {
     Inter_700Bold,
   });
 
-  // Game state
+  // ---- game state ----
   const [cards, setCards] = useState([]);
   const [flippedCards, setFlippedCards] = useState([]);
   const [matchedCards, setMatchedCards] = useState([]);
   const [moves, setMoves] = useState(0);
+
   const [timer, setTimer] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [gameStarted, setGameStarted] = useState(false);
   const [gameCompleted, setGameCompleted] = useState(false);
+  const [bestTime, setBestTime] = useState(null);
 
-  // Game configuration
-  const gridSize = 6; // 6x6 grid = 36 cards (18 pairs)
+  const gridSize = 6; // 6x6
+  const totalPairs = 18;
   const cardSize = (screenWidth - 80) / gridSize - 8;
 
-  // Card symbols/emojis - need 18 different symbols for 18 pairs
   const symbols = [
     "🌟",
     "🎯",
@@ -127,22 +136,41 @@ export default function MemoryMatchGame() {
     "🏅",
   ];
 
-  // Initialize game
+  // load best time
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem(BEST_TIME_KEY);
+        if (saved) setBestTime(parseInt(saved, 10));
+      } catch {}
+    })();
+  }, []);
+
+  const saveBestTime = useCallback(async (timeSeconds) => {
+    try {
+      const prev = await AsyncStorage.getItem(BEST_TIME_KEY);
+      const prevVal = prev ? parseInt(prev, 10) : null;
+      if (prevVal == null || timeSeconds < prevVal) {
+        await AsyncStorage.setItem(BEST_TIME_KEY, String(timeSeconds));
+        setBestTime(timeSeconds);
+      }
+    } catch {}
+  }, []);
+
+  // init game
   const initializeGame = useCallback(() => {
-    // Create pairs of symbols for matching
-    const gamePairs = symbols.slice(0, 18); // Use 18 symbols for 36 cards
-    const shuffledSymbols = [...gamePairs, ...gamePairs].sort(
-      () => Math.random() - 0.5
-    );
+    const deckSymbols = symbols.slice(0, totalPairs);
+    const shuffled = [...deckSymbols, ...deckSymbols]
+      .map((s, i) => ({ s, r: Math.random(), i }))
+      .sort((a, b) => a.r - b.r)
+      .map((x, idx) => ({
+        id: idx,
+        symbol: x.s,
+        isFlipped: false,
+        isMatched: false,
+      }));
 
-    const gameCards = shuffledSymbols.map((symbol, index) => ({
-      id: index,
-      symbol,
-      isFlipped: false,
-      isMatched: false,
-    }));
-
-    setCards(gameCards);
+    setCards(shuffled);
     setFlippedCards([]);
     setMatchedCards([]);
     setMoves(0);
@@ -150,130 +178,150 @@ export default function MemoryMatchGame() {
     setIsPlaying(false);
     setGameStarted(false);
     setGameCompleted(false);
-
-    console.log("Game initialized with cards:", gameCards.length); // Debug log
   }, []);
 
-  // Timer effect
-  useEffect(() => {
-    let interval;
-    if (isPlaying && gameStarted && !gameCompleted) {
-      interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [isPlaying, gameStarted, gameCompleted]);
-
-  // Initialize game on mount
   useEffect(() => {
     initializeGame();
   }, [initializeGame]);
 
-  // Check for game completion
+  // timer
+  useEffect(() => {
+    let interval;
+    if (isPlaying && gameStarted && !gameCompleted) {
+      interval = setInterval(() => setTimer((t) => t + 1), 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isPlaying, gameStarted, gameCompleted]);
+
+  // complete?
   useEffect(() => {
     if (
-      matchedCards.length === cards.length &&
       cards.length > 0 &&
-      matchedCards.length > 0
+      matchedCards.length > 0 &&
+      matchedCards.length === cards.length
     ) {
       setGameCompleted(true);
       setIsPlaying(false);
 
-      // End game tracking and submit session automatically
-      if (gameId) {
-        gameTracker.endGame(gameId, 100); // Fixed score of 100 for completion
+      // save best time
+      saveBestTime(timer);
+
+      // submit session ONCE with time-focused scoring
+      if (sessionId && !submittedRef.current) {
+        try {
+          const score = Math.max(1, 100000 - timer * 100 - moves * 10); // higher is better
+          gameTracker.endGame(sessionId, score, {
+            time_s: timer,
+            moves,
+            pairs: totalPairs,
+            best_time: bestTime,
+            result: "win",
+          });
+          submittedRef.current = true;
+        } catch (e) {
+          console.warn("endGame failed", e);
+        }
       }
 
-      // Show completion alert
       Alert.alert(
         "Game Complete! 🎉",
-        `Points earned: 100\nMoves: ${moves}\nTime: ${formatTime(timer)}`,
+        `Time: ${formatTime(timer)}\nMoves: ${moves}${
+          bestTime != null && timer <= bestTime ? "\nNew Best Time! 🥇" : ""
+        }`,
         [
           { text: "Play Again", onPress: initializeGame },
-          { text: "Back to Hub", onPress: () => router.back() },
+          {
+            text: "Back to Hub",
+            onPress: () => {
+              router.back();
+            },
+          },
         ]
       );
     }
-  }, [matchedCards, cards, moves, timer, gameId, initializeGame]);
+  }, [matchedCards, cards, moves, timer, sessionId, bestTime, saveBestTime, initializeGame]);
 
-  // Handle card flip
+  // flip logic
   const handleCardFlip = async (cardId) => {
+    if (gameCompleted) return;
+
     if (!gameStarted) {
       setGameStarted(true);
       setIsPlaying(true);
     }
 
-    if (flippedCards.length >= 2 || flippedCards.includes(cardId)) {
+    if (
+      flippedCards.length >= 2 ||
+      flippedCards.includes(cardId) ||
+      (gameStarted && !isPlaying)
+    ) {
       return;
     }
 
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {}
 
-    const newFlippedCards = [...flippedCards, cardId];
-    setFlippedCards(newFlippedCards);
-
-    // Update card state to show as flipped
+    // flip the tapped card
     setCards((prev) =>
-      prev.map((card) =>
-        card.id === cardId ? { ...card, isFlipped: true } : card
-      )
+      prev.map((c) => (c.id === cardId ? { ...c, isFlipped: true } : c))
     );
+    const newerFlipped = [...flippedCards, cardId];
+    setFlippedCards(newerFlipped);
 
-    if (newFlippedCards.length === 2) {
-      setMoves((prev) => prev + 1);
-
-      const [firstCard, secondCard] = newFlippedCards.map((id) =>
-        cards.find((card) => card.id === id)
-      );
+    if (newerFlipped.length === 2) {
+      setMoves((m) => m + 1);
+      // find symbols from current cards list (safe enough here)
+      const [aId, bId] = newerFlipped;
+      const a = cards.find((c) => c.id === aId);
+      const b = cards.find((c) => c.id === bId);
 
       setTimeout(() => {
-        if (firstCard.symbol === secondCard.symbol) {
-          // Match found
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          setMatchedCards((prev) => [...prev, ...newFlippedCards]);
+        if (a && b && a.symbol === b.symbol) {
+          try {
+            Haptics.notificationAsync(
+              Haptics.NotificationFeedbackType.Success
+            );
+          } catch {}
+          setMatchedCards((prev) => [...prev, aId, bId]);
           setCards((prev) =>
-            prev.map((card) =>
-              newFlippedCards.includes(card.id)
-                ? { ...card, isMatched: true }
-                : card
+            prev.map((c) =>
+              c.id === aId || c.id === bId ? { ...c, isMatched: true } : c
             )
           );
         } else {
-          // No match, flip cards back
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          try {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          } catch {}
           setCards((prev) =>
-            prev.map((card) =>
-              newFlippedCards.includes(card.id)
-                ? { ...card, isFlipped: false }
-                : card
+            prev.map((c) =>
+              c.id === aId || c.id === bId ? { ...c, isFlipped: false } : c
             )
           );
         }
         setFlippedCards([]);
-      }, 1000);
+      }, 700);
     }
   };
 
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60);
+    const ss = (s % 60).toString().padStart(2, "0");
+    return `${m}:${ss}`;
   };
 
   const togglePause = async () => {
-    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setIsPlaying(!isPlaying);
+    try {
+      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } catch {}
+    setIsPlaying((p) => !p);
   };
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  if (!fontsLoaded) return null;
 
   return (
     <View style={{ flex: 1 }}>
       <StatusBar style={isDark ? "light" : "dark"} />
-
       <NightSkyBackground />
 
       {/* Header */}
@@ -293,7 +341,18 @@ export default function MemoryMatchGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={() => {
+              // Back: cancel session if not submitted
+              if (sessionId && !submittedRef.current) {
+                try {
+                  gameTracker.endGame(sessionId, 0, {
+                    cancelled: true,
+                    reason: "back",
+                  });
+                } catch {}
+              }
+              router.back();
+            }}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -325,13 +384,8 @@ export default function MemoryMatchGame() {
           </TouchableOpacity>
         </View>
 
-        {/* Game stats */}
-        <View
-          style={{
-            borderRadius: 16,
-            overflow: "hidden",
-          }}
-        >
+        {/* Stats row */}
+        <View style={{ borderRadius: 16, overflow: "hidden" }}>
           <BlurView
             intensity={isDark ? 60 : 80}
             tint={isDark ? "dark" : "light"}
@@ -400,6 +454,30 @@ export default function MemoryMatchGame() {
                 </Text>
               </View>
 
+              <View style={{ alignItems: "center" }}>
+                <Text
+                  style={{
+                    fontFamily: "Inter_500Medium",
+                    fontSize: 12,
+                    color: colors.textSecondary,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                    marginBottom: 4,
+                  }}
+                >
+                  Best
+                </Text>
+                <Text
+                  style={{
+                    fontFamily: "Inter_700Bold",
+                    fontSize: 18,
+                    color: colors.gameAccent1,
+                  }}
+                >
+                  {bestTime != null ? formatTime(bestTime) : "—"}
+                </Text>
+              </View>
+
               {gameStarted && !gameCompleted && (
                 <TouchableOpacity
                   onPress={togglePause}
@@ -421,7 +499,7 @@ export default function MemoryMatchGame() {
         </View>
       </View>
 
-      {/* Game board */}
+      {/* Board */}
       <View
         style={{
           flex: 1,

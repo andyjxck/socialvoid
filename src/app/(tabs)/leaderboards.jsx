@@ -43,16 +43,38 @@ export default function LeaderboardsScreen() {
   const [friendsOnly, setFriendsOnly] = useState(false);
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
 
-  useEffect(() => {
+   useEffect(() => {
     const loadPlayerId = async () => {
       try {
         const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
         if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-          console.log("✅ Loaded player ID:", savedPlayerId);
-        } else {
-          console.warn("⚠️ No player ID found in storage");
+          const idNum = parseInt(savedPlayerId, 10);
+          setCurrentPlayerId(idNum);
+          console.log("✅ Loaded player ID from AsyncStorage:", idNum);
+          return;
         }
+
+        // Fallback: derive player id from Supabase auth user
+        const { data: { user } = {}, error: userErr } = await supabase.auth.getUser();
+        if (userErr) {
+          console.warn("⚠️ No auth user found:", userErr.message);
+        }
+        if (user?.id) {
+          const { data: playerRow, error: pErr } = await supabase
+            .from("players")
+            .select("id")
+            .eq("user_id", user.id)
+            .single();
+
+          if (!pErr && playerRow?.id) {
+            setCurrentPlayerId(playerRow.id);
+            await AsyncStorage.setItem("puzzle_hub_player_id", String(playerRow.id));
+            console.log("✅ Derived player ID from auth.user:", playerRow.id);
+            return;
+          }
+        }
+
+        console.warn("⚠️ No player ID found (storage/auth).");
       } catch (error) {
         console.error("❌ Failed to load player ID:", error);
       }
@@ -79,7 +101,7 @@ export default function LeaderboardsScreen() {
     refetchInterval: 60000,
   });
 
-  // 🏆 Fetch leaderboard
+   // 🏆 Fetch leaderboard (REPLACED)
   const {
     data: players = [],
     isLoading,
@@ -95,38 +117,90 @@ export default function LeaderboardsScreen() {
     queryFn: async () => {
       if (!currentPlayerId) return [];
 
-      let query;
-      if (selectedGameId) {
-        query = supabase
-          .from("player_game_stats")
-          .select("*, players(username, profile_emoji)")
-          .eq("game_id", selectedGameId);
+      const normalizeOverall = (rows) =>
+        (rows || []).map((p) => ({
+          player_id: p.id,
+          username: p.username || "Unknown",
+          profile_emoji: p.profile_emoji || "🧩",
+          total_playtime_seconds: p.total_playtime_seconds || 0,
+          total_points: p.total_points || 0,
+          high_score: undefined,
+          total_plays: undefined,
+        }));
 
-        if (leaderboardType === "playtime") {
-          query = query.order("total_playtime_seconds", { ascending: false });
-        } else {
-          query = query.order("high_score", { ascending: false });
-        }
-      } else {
-        query = supabase
+      const normalizePerGame = (rows) =>
+        (rows || []).map((r) => ({
+          player_id: r.player_id,
+          username: r.players?.username || "Unknown",
+          profile_emoji: r.players?.profile_emoji || "🧩",
+          total_playtime_seconds: r.total_playtime_seconds || 0,
+          total_points: undefined,
+          high_score: r.high_score || 0,
+          total_plays: r.total_plays || 0,
+        }));
+
+      const applyFriendsFilter = (rows) => {
+        if (!friendsOnly) return rows;
+        // TODO: when you have a friends list, filter by friend IDs here
+        return rows;
+      };
+
+      if (!selectedGameId) {
+        // Overall leaderboard (players table)
+        let query = supabase
           .from("players")
-          .select("*")
-          .order(
-            leaderboardType === "playtime"
-              ? "total_playtime_seconds"
-              : "total_points",
-            { ascending: false }
-          );
+          .select("id, username, profile_emoji, total_playtime_seconds, total_points");
+
+        query =
+          leaderboardType === "playtime"
+            ? query.order("total_playtime_seconds", { ascending: false, nullsFirst: false })
+            : query.order("total_points", { ascending: false, nullsFirst: false });
+
+        const { data, error } = await query.limit(50);
+        if (error) {
+          console.error("❌ Overall leaderboard error:", error);
+          return [];
+        }
+
+        const rows = normalizeOverall(data);
+        const filtered = applyFriendsFilter(rows);
+        console.log(`✅ Overall ${leaderboardType}:`, filtered.length);
+        return filtered;
       }
 
-      if (friendsOnly) {
-        console.log("👥 Friends-only filter active (placeholder)");
-        // TODO: apply .in("player_id", friendsListIds)
-      }
+      // Per-game leaderboard (player_game_stats JOIN players)
+      let query = supabase
+        .from("player_game_stats")
+        .select(
+          `
+          player_id,
+          game_id,
+          total_playtime_seconds,
+          total_plays,
+          high_score,
+          players:player_id (
+            username,
+            profile_emoji
+          )
+        `
+        )
+        .eq("game_id", selectedGameId);
+
+      query =
+        leaderboardType === "playtime"
+          ? query.order("total_playtime_seconds", { ascending: false, nullsFirst: false })
+          : query.order("high_score", { ascending: false, nullsFirst: false });
 
       const { data, error } = await query.limit(50);
-      if (error) throw error;
-      return data || [];
+      if (error) {
+        console.error("❌ Per-game leaderboard error:", error);
+        return [];
+      }
+
+      const rows = normalizePerGame(data);
+      const filtered = applyFriendsFilter(rows);
+      console.log(`✅ Game ${selectedGameId} ${leaderboardType}:`, filtered.length);
+      return filtered;
     },
     enabled: !!currentPlayerId,
     refetchInterval: 60000,

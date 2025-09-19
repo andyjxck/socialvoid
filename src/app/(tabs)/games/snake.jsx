@@ -1,3 +1,4 @@
+// src/app/(tabs)/games/snake.jsx
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, TouchableOpacity, Dimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -6,7 +7,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import { ArrowLeft, RotateCcw, Trophy, Settings } from "lucide-react-native";
+import { ArrowLeft, Trophy, Settings } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import {
   PanGestureHandler,
@@ -36,58 +37,74 @@ const DIFFICULTIES = {
 export default function SnakeGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+
+  // Player & Game IDs
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const submittedRef = useRef(false); // prevents double-submit
 
-  // Get player ID from AsyncStorage
+  // Load player id once
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch {
         setCurrentPlayerId(1);
       }
     };
     loadPlayerId();
   }, []);
 
-  // Get the correct game ID and start tracking
+  // Start tracking on mount; submit on unmount if needed
   useEffect(() => {
     let mounted = true;
     let currentGameId = null;
 
     const setupGame = async () => {
       if (!currentPlayerId) return;
-
-      const id = await getGameId(GAME_TYPES.SNAKE);
-      if (id && currentPlayerId && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Snake tracking started:", id);
-      } else if (mounted) {
-        console.error("❌ Could not get Snake game ID or player ID");
+      try {
+        const id = await getGameId(GAME_TYPES.SNAKE);
+        if (!mounted) return;
+        if (id) {
+          currentGameId = id;
+          setGameId(id);
+          await gameTracker.startGame(id, currentPlayerId);
+          // console.log("🎮 Snake tracking started:", id);
+        } else {
+          console.error("❌ Could not get Snake game ID");
+        }
+      } catch (e) {
+        console.warn("startGame failed:", e?.message || e);
       }
     };
 
     setupGame();
 
-    // Cleanup when component unmounts or effect re-runs
     return () => {
       mounted = false;
-      if (currentGameId) {
-        gameTracker.endGame(currentGameId, 0);
+      // If we leave without having submitted yet, count as a play with the last score
+      if (currentGameId && !submittedRef.current) {
+        try {
+          // We'll read the latest score via ref below
+          const finalScore = scoreRef.current || 0;
+          const meta = {
+            result: "back",
+            completed: false,
+            reason: "unmount",
+            difficulty,
+          };
+          // only attach high_score if it beats local best
+          if (finalScore > bestScoreRef.current) meta.high_score = finalScore;
+          gameTracker.endGame(currentGameId, finalScore, meta);
+          submittedRef.current = true;
+        } catch (e) {
+          console.warn("endGame on unmount failed:", e?.message || e);
+        }
       }
     };
-  }, [currentPlayerId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPlayerId]); // (difficulty is read from ref in unmount submit)
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -103,14 +120,43 @@ export default function SnakeGame() {
   const [food, setFood] = useState(null);
   const [direction, setDirection] = useState("RIGHT");
   const [score, setScore] = useState(0);
+  const [bestLocalScore, setBestLocalScore] = useState(0); // local best to gate high_score submits
   const [gameOver, setGameOver] = useState(false);
   const [paused, setPaused] = useState(false);
 
-  const gameLoopRef = useRef();
+  // Refs for latest values (so stable callbacks can use fresh state)
+  const scoreRef = useRef(0);
+  const bestScoreRef = useRef(0);
+  const difficultyRef = useRef("medium");
+  useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { bestScoreRef.current = bestLocalScore; }, [bestLocalScore]);
+  useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
+
+  // Load local best for snake
+  useEffect(() => {
+    const loadBest = async () => {
+      try {
+        const saved = await AsyncStorage.getItem("snake_scores");
+        if (saved) {
+          const { best = 0 } = JSON.parse(saved);
+          setBestLocalScore(best);
+        }
+      } catch {}
+    };
+    loadBest();
+  }, []);
+
+  const saveLocalScores = useCallback(async (best) => {
+    try {
+      await AsyncStorage.setItem("snake_scores", JSON.stringify({ best }));
+    } catch {}
+  }, []);
+
   const gridSize = DIFFICULTIES[difficulty].gridSize;
   const cellSize = (screenWidth - 60) / gridSize;
+  const gameLoopRef = useRef();
 
-  // Generate random food position
+  // Food generator
   const generateFood = useCallback(
     (snakeBody) => {
       let newFood;
@@ -119,18 +165,15 @@ export default function SnakeGame() {
           x: Math.floor(Math.random() * gridSize),
           y: Math.floor(Math.random() * gridSize),
         };
-      } while (
-        snakeBody.some(
-          (segment) => segment.x === newFood.x && segment.y === newFood.y
-        )
-      );
+      } while (snakeBody.some((s) => s.x === newFood.x && s.y === newFood.y));
       return newFood;
     },
     [gridSize]
   );
 
-  // Initialize game
+  // Initialize a run
   const initializeGame = useCallback(() => {
+    submittedRef.current = false; // new run not yet submitted
     const initialSnake = [
       { x: Math.floor(gridSize / 2), y: Math.floor(gridSize / 2) },
     ];
@@ -143,62 +186,78 @@ export default function SnakeGame() {
     setGameStarted(true);
   }, [gridSize, generateFood]);
 
-  // Move snake
-  const moveSnake = useCallback(async () => {
+  // Persistent submitter (lose/back). Only attaches meta.high_score if beating local best.
+  const submitPersistent = useCallback(
+    (finalScore, reason) => {
+      if (!gameId || submittedRef.current) return;
+      try {
+        const meta = {
+          result: reason === "lose" ? "lose" : "back",
+          completed: false,
+          reason,
+          difficulty: difficultyRef.current,
+        };
+        if (finalScore > bestScoreRef.current) {
+          meta.high_score = finalScore; // backend should only update if greater anyway
+        }
+        gameTracker.endGame(gameId, finalScore, meta);
+        submittedRef.current = true;
+
+        // update local best if beaten
+        if (finalScore > bestScoreRef.current) {
+          setBestLocalScore(finalScore);
+          saveLocalScores(finalScore);
+        }
+      } catch (e) {
+        console.warn("submitPersistent failed:", e?.message || e);
+      }
+    },
+    [gameId, saveLocalScores]
+  );
+
+  // Move snake loop
+  const moveSnake = useCallback(() => {
     if (gameOver || paused || !gameStarted) return;
 
     setSnake((currentSnake) => {
       const newSnake = [...currentSnake];
       const head = { ...newSnake[0] };
 
-      // Move head based on direction
       switch (direction) {
-        case "UP":
-          head.y -= 1;
-          break;
-        case "DOWN":
-          head.y += 1;
-          break;
-        case "LEFT":
-          head.x -= 1;
-          break;
-        case "RIGHT":
-          head.x += 1;
-          break;
+        case "UP": head.y -= 1; break;
+        case "DOWN": head.y += 1; break;
+        case "LEFT": head.x -= 1; break;
+        case "RIGHT": head.x += 1; break;
       }
 
-      // Check wall collision
-      if (
-        head.x < 0 ||
-        head.x >= gridSize ||
-        head.y < 0 ||
-        head.y >= gridSize
-      ) {
+      // Walls
+      if (head.x < 0 || head.x >= gridSize || head.y < 0 || head.y >= gridSize) {
         setGameOver(true);
-        // End game tracking with final score
-        if (gameId) {
-          gameTracker.endGame(gameId, score);
-        }
+        // submit score as a loss
+        submitPersistent(scoreRef.current, "lose");
         return currentSnake;
       }
 
-      // Check self collision
-      if (
-        newSnake.some((segment) => segment.x === head.x && segment.y === head.y)
-      ) {
+      // Self
+      if (newSnake.some((seg) => seg.x === head.x && seg.y === head.y)) {
         setGameOver(true);
-        // End game tracking with final score
-        if (gameId) {
-          gameTracker.endGame(gameId, score);
-        }
+        submitPersistent(scoreRef.current, "lose");
         return currentSnake;
       }
 
       newSnake.unshift(head);
 
-      // Check food collision
+      // Food
       if (food && head.x === food.x && head.y === food.y) {
-        setScore((prev) => prev + 1);
+        setScore((prev) => {
+          const next = prev + 1;
+          // maintain local best while playing (optional UX)
+          if (next > bestScoreRef.current) {
+            setBestLocalScore(next);
+            saveLocalScores(next);
+          }
+          return next;
+        });
         setFood(generateFood(newSnake));
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       } else {
@@ -212,14 +271,14 @@ export default function SnakeGame() {
     gameOver,
     paused,
     gameStarted,
-    food,
     gridSize,
+    food,
     generateFood,
-    score,
-    gameId,
+    submitPersistent,
+    saveLocalScores,
   ]);
 
-  // Game loop
+  // Game loop timer
   useEffect(() => {
     if (gameStarted && !gameOver && !paused) {
       gameLoopRef.current = setInterval(
@@ -230,51 +289,44 @@ export default function SnakeGame() {
     }
   }, [moveSnake, gameStarted, gameOver, paused, difficulty]);
 
-  // Handle direction change
+  // Direction change
   const changeDirection = (newDirection) => {
     if (gameOver || !gameStarted) return;
-
-    // Prevent reverse direction
-    const opposites = {
-      UP: "DOWN",
-      DOWN: "UP",
-      LEFT: "RIGHT",
-      RIGHT: "LEFT",
-    };
-
+    const opposites = { UP: "DOWN", DOWN: "UP", LEFT: "RIGHT", RIGHT: "LEFT" };
     if (opposites[direction] !== newDirection) {
       setDirection(newDirection);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     }
   };
 
-  // Toggle pause
+  // Pause
   const togglePause = () => {
     if (!gameOver && gameStarted) {
-      setPaused(!paused);
+      setPaused((p) => !p);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     }
   };
 
-  // Start game with selected difficulty
+  // Start with selected difficulty
   const startGame = (selectedDifficulty) => {
     setDifficulty(selectedDifficulty);
     initializeGame();
   };
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  // Back from in-game → count as a play, possibly update high_score
+  const handleBackFromGame = useCallback(() => {
+    submitPersistent(scoreRef.current, "back");
+    setGameStarted(false); // go to difficulty view
+  }, [submitPersistent]);
+
+  if (!fontsLoaded) return null;
 
   // Difficulty selection screen
   if (!gameStarted) {
     return (
       <View style={{ flex: 1 }}>
         <StatusBar style={isDark ? "light" : "dark"} />
-
-        {/* Night sky background */}
         <NightSkyBackground />
-
         <LinearGradient
           colors={
             isDark
@@ -299,7 +351,10 @@ export default function SnakeGame() {
             }}
           >
             <TouchableOpacity
-              onPress={() => router.back()}
+              onPress={() => {
+                // leaving the screen from difficulty view — no current run to submit
+                router.back();
+              }}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -323,9 +378,7 @@ export default function SnakeGame() {
           </View>
         </View>
 
-        <View
-          style={{ flex: 1, paddingHorizontal: 20, justifyContent: "center" }}
-        >
+        <View style={{ flex: 1, paddingHorizontal: 20, justifyContent: "center" }}>
           <Text
             style={{
               fontFamily: "Inter_700Bold",
@@ -380,8 +433,7 @@ export default function SnakeGame() {
                     color: colors.textSecondary,
                   }}
                 >
-                  {config.gridSize}×{config.gridSize} grid • {config.speed}ms
-                  speed
+                  {config.gridSize}×{config.gridSize} grid • {config.speed}ms speed
                 </Text>
               </TouchableOpacity>
             ))}
@@ -391,12 +443,11 @@ export default function SnakeGame() {
     );
   }
 
+  // In-game screen
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
         <StatusBar style={isDark ? "light" : "dark"} />
-
-        {/* Night sky background */}
         <NightSkyBackground />
 
         {/* Header */}
@@ -416,7 +467,7 @@ export default function SnakeGame() {
             }}
           >
             <TouchableOpacity
-              onPress={() => setGameStarted(false)}
+              onPress={handleBackFromGame}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -437,7 +488,7 @@ export default function SnakeGame() {
             </Text>
 
             <TouchableOpacity
-              onPress={() => setGameStarted(false)}
+              onPress={handleBackFromGame}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -448,7 +499,7 @@ export default function SnakeGame() {
             </TouchableOpacity>
           </View>
 
-          {/* Game stats */}
+          {/* Stats */}
           <View style={{ borderRadius: 16, overflow: "hidden" }}>
             <BlurView
               intensity={isDark ? 60 : 80}
@@ -544,27 +595,18 @@ export default function SnakeGame() {
           </View>
         </View>
 
-        {/* Game board with swipe controls */}
+        {/* Board & swipe */}
         <PanGestureHandler
           onHandlerStateChange={(event) => {
             if (event.nativeEvent.state === State.END) {
               const { translationX, translationY } = event.nativeEvent;
               const threshold = 50;
-
               if (Math.abs(translationX) > Math.abs(translationY)) {
-                // Horizontal swipe
-                if (translationX > threshold) {
-                  changeDirection("RIGHT");
-                } else if (translationX < -threshold) {
-                  changeDirection("LEFT");
-                }
+                if (translationX > threshold) changeDirection("RIGHT");
+                else if (translationX < -threshold) changeDirection("LEFT");
               } else {
-                // Vertical swipe
-                if (translationY > threshold) {
-                  changeDirection("DOWN");
-                } else if (translationY < -threshold) {
-                  changeDirection("UP");
-                }
+                if (translationY > threshold) changeDirection("DOWN");
+                else if (translationY < -threshold) changeDirection("UP");
               }
             }
           }}
@@ -579,7 +621,6 @@ export default function SnakeGame() {
               marginBottom: 20,
             }}
           >
-            {/* Snake and Food */}
             {snake.map((segment, index) => (
               <View
                 key={index}
@@ -590,9 +631,7 @@ export default function SnakeGame() {
                   width: cellSize,
                   height: cellSize,
                   backgroundColor:
-                    index === 0
-                      ? colors.gameAccent5
-                      : colors.gameAccent5 + "80",
+                    index === 0 ? colors.gameAccent5 : colors.gameAccent5 + "80",
                   borderRadius: index === 0 ? cellSize / 3 : cellSize / 6,
                   borderWidth: index === 0 ? 1 : 0,
                   borderColor: colors.background,
@@ -618,14 +657,9 @@ export default function SnakeGame() {
           </View>
         </PanGestureHandler>
 
-        {/* Directional Controls */}
-        <View
-          style={{
-            alignSelf: "center",
-            marginBottom: 20,
-          }}
-        >
-          {/* Up button */}
+        {/* Controls */}
+        <View style={{ alignSelf: "center", marginBottom: 20 }}>
+          {/* Up */}
           <View style={{ alignItems: "center", marginBottom: 8 }}>
             <TouchableOpacity
               onPress={() => changeDirection("UP")}
@@ -652,7 +686,7 @@ export default function SnakeGame() {
             </TouchableOpacity>
           </View>
 
-          {/* Left, Pause, Right row */}
+          {/* Left / Pause / Right */}
           <View
             style={{
               flexDirection: "row",
@@ -735,7 +769,7 @@ export default function SnakeGame() {
             </TouchableOpacity>
           </View>
 
-          {/* Down button */}
+          {/* Down */}
           <View style={{ alignItems: "center" }}>
             <TouchableOpacity
               onPress={() => changeDirection("DOWN")}
@@ -870,11 +904,7 @@ export default function SnakeGame() {
                   alignItems: "center",
                 }}
               >
-                <Trophy
-                  size={48}
-                  color={colors.gameAccent5}
-                  style={{ marginBottom: 16 }}
-                />
+                <Trophy size={48} color={colors.gameAccent5} style={{ marginBottom: 16 }} />
 
                 <Text
                   style={{
@@ -932,7 +962,7 @@ export default function SnakeGame() {
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    onPress={() => setGameStarted(false)}
+                    onPress={handleBackFromGame}
                     style={{
                       backgroundColor: colors.primaryButton,
                       paddingHorizontal: 20,

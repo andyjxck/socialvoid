@@ -1,12 +1,12 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, TouchableOpacity, Dimensions, Alert } from "react-native";
+// src/app/(tabs)/games/sliding-puzzle.jsx
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { View, Text, TouchableOpacity, Dimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import { ArrowLeft, RotateCcw, Trophy, Shuffle } from "lucide-react-native";
+import { ArrowLeft, Trophy, Shuffle } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
@@ -26,55 +26,63 @@ const { width: screenWidth } = Dimensions.get("window");
 export default function SlidingPuzzleGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+
+  // ──────────────────────────────────
+  // Player + game ids
+  // ──────────────────────────────────
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const submittedRef = useRef(false); // guard against double submit
 
-  // Get player ID from AsyncStorage
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
+        const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId, 10) : 1);
+      } catch {
         setCurrentPlayerId(1);
       }
     };
     loadPlayerId();
   }, []);
 
-  // Get the correct game ID and start tracking
   useEffect(() => {
     let mounted = true;
     let currentGameId = null;
 
-    const setupGame = async () => {
+    const setup = async () => {
       if (!currentPlayerId) return;
-
       const id = await getGameId(GAME_TYPES.SLIDING_PUZZLE);
-      if (id && currentPlayerId && mounted) {
+      if (!mounted) return;
+      if (id) {
         currentGameId = id;
         setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Sliding Puzzle tracking started:", id);
-      } else if (mounted) {
-        console.error("❌ Could not get Sliding Puzzle game ID or player ID");
+        try {
+          await gameTracker.startGame(id, currentPlayerId);
+        } catch (e) {
+          console.warn("startGame failed:", e?.message || e);
+        }
+      } else {
+        console.error("❌ Could not resolve Sliding Puzzle game ID");
       }
     };
 
-    setupGame();
+    setup();
 
-    // Cleanup when component unmounts or effect re-runs
     return () => {
       mounted = false;
-      if (currentGameId) {
-        gameTracker.endGame(currentGameId, 0);
+      // If we leave mid-run without submitting a final result, count as a play (no best_time)
+      if (currentGameId && !submittedRef.current) {
+        try {
+          gameTracker.endGame(currentGameId, 0, {
+            result: "play",
+            completed: false,
+            reason: "unmount",
+          });
+          submittedRef.current = true;
+        } catch (e) {
+          console.warn("endGame on unmount failed:", e?.message || e);
+        }
       }
     };
   }, [currentPlayerId]);
@@ -86,237 +94,242 @@ export default function SlidingPuzzleGame() {
     Inter_700Bold,
   });
 
+  // ──────────────────────────────────
   // Game state
+  // ──────────────────────────────────
   const [board, setBoard] = useState([]);
   const [moves, setMoves] = useState(0);
   const [timer, setTimer] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
   const [gameWon, setGameWon] = useState(false);
 
+  // live refs so stable callbacks can read fresh values
+  const movesRef = useRef(0);
+  const timerRef = useRef(0);
+  const gameWonRef = useRef(false);
+  useEffect(() => { movesRef.current = moves; }, [moves]);
+  useEffect(() => { timerRef.current = timer; }, [timer]);
+  useEffect(() => { gameWonRef.current = gameWon; }, [gameWon]);
+
   const GRID_SIZE = 4;
   const TILE_SIZE = (screenWidth - 80) / GRID_SIZE - 8;
 
-  // Create solved board (1-15 with 0 as empty space)
+  // ──────────────────────────────────
+  // Helpers
+  // ──────────────────────────────────
   const createSolvedBoard = () => {
-    const board = [];
-    for (let i = 1; i < GRID_SIZE * GRID_SIZE; i++) {
-      board.push(i);
-    }
-    board.push(0); // Empty space
-    return board;
+    const b = [];
+    for (let i = 1; i < GRID_SIZE * GRID_SIZE; i++) b.push(i);
+    b.push(0);
+    return b;
   };
 
-  // Check if a configuration is solvable (inversion count must be correct)
-  const isSolvable = (board) => {
+  const isSolvable = (b) => {
     let inversions = 0;
-    const flatBoard = board.filter((val) => val !== 0); // Remove empty space
-
-    for (let i = 0; i < flatBoard.length - 1; i++) {
-      for (let j = i + 1; j < flatBoard.length; j++) {
-        if (flatBoard[i] > flatBoard[j]) {
-          inversions++;
-        }
+    const flat = b.filter((v) => v !== 0);
+    for (let i = 0; i < flat.length - 1; i++) {
+      for (let j = i + 1; j < flat.length; j++) {
+        if (flat[i] > flat[j]) inversions++;
       }
     }
-
-    // For 4x4 grid: puzzle is solvable if:
-    // - Empty space on even row (counting from bottom) and inversions odd
-    // - Empty space on odd row (counting from bottom) and inversions even
-    const emptyIndex = board.indexOf(0);
+    const emptyIndex = b.indexOf(0);
     const emptyRow = Math.floor(emptyIndex / GRID_SIZE);
     const emptyRowFromBottom = GRID_SIZE - emptyRow;
-
-    if (emptyRowFromBottom % 2 === 0) {
-      return inversions % 2 === 1;
-    } else {
-      return inversions % 2 === 0;
-    }
+    if (emptyRowFromBottom % 2 === 0) return inversions % 2 === 1;
+    return inversions % 2 === 0;
   };
 
-  // Count minimum moves needed to solve (Manhattan distance heuristic)
-  const calculateDifficulty = (board) => {
-    let totalDistance = 0;
-
-    for (let i = 0; i < board.length; i++) {
-      const value = board[i];
-      if (value === 0) continue;
-
-      // Current position
-      const currentRow = Math.floor(i / GRID_SIZE);
-      const currentCol = i % GRID_SIZE;
-
-      // Target position
-      const targetIndex = value - 1;
-      const targetRow = Math.floor(targetIndex / GRID_SIZE);
-      const targetCol = targetIndex % GRID_SIZE;
-
-      // Manhattan distance
-      const distance =
-        Math.abs(currentRow - targetRow) + Math.abs(currentCol - targetCol);
-      totalDistance += distance;
+  const calculateDifficulty = (b) => {
+    let total = 0;
+    for (let i = 0; i < b.length; i++) {
+      const v = b[i];
+      if (!v) continue;
+      const cr = Math.floor(i / GRID_SIZE);
+      const cc = i % GRID_SIZE;
+      const tIdx = v - 1;
+      const tr = Math.floor(tIdx / GRID_SIZE);
+      const tc = tIdx % GRID_SIZE;
+      total += Math.abs(cr - tr) + Math.abs(cc - tc);
     }
-
-    return totalDistance;
+    return total;
   };
 
-  // Generate a challenging but solvable puzzle
+  const shuffleBoardWithMoves = () => {
+    const nb = createSolvedBoard();
+    const shuffleMoves = 100 + Math.floor(Math.random() * 100);
+    for (let i = 0; i < shuffleMoves; i++) {
+      const emptyIndex = nb.indexOf(0);
+      const opts = getPossibleMoves(nb, emptyIndex);
+      if (opts.length) {
+        const pick = opts[Math.floor(Math.random() * opts.length)];
+        [nb[emptyIndex], nb[pick]] = [nb[pick], nb[emptyIndex]];
+      }
+    }
+    return nb;
+  };
+
   const generateChallengingPuzzle = () => {
-    let board;
+    let b;
     let attempts = 0;
     const maxAttempts = 1000;
-    const minDifficulty = 25; // Minimum Manhattan distance for a challenging puzzle
-
+    const minDifficulty = 25;
     do {
-      // Create random permutation
-      board = [];
-      for (let i = 0; i < GRID_SIZE * GRID_SIZE - 1; i++) {
-        board.push(i + 1);
-      }
-      board.push(0);
-
-      // Fisher-Yates shuffle
-      for (let i = board.length - 1; i > 0; i--) {
+      b = [];
+      for (let i = 0; i < GRID_SIZE * GRID_SIZE - 1; i++) b.push(i + 1);
+      b.push(0);
+      for (let i = b.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [board[i], board[j]] = [board[j], board[i]];
+        [b[i], b[j]] = [b[j], b[i]];
       }
-
       attempts++;
-    } while (
-      (!isSolvable(board) || calculateDifficulty(board) < minDifficulty) &&
-      attempts < maxAttempts
-    );
+    } while ((!isSolvable(b) || calculateDifficulty(b) < minDifficulty) && attempts < maxAttempts);
 
-    // Fallback: if we can't generate a challenging puzzle, use move-based shuffle
-    if (attempts >= maxAttempts) {
-      return shuffleBoardWithMoves();
-    }
-
-    return board;
+    if (attempts >= maxAttempts) return shuffleBoardWithMoves();
+    return b;
   };
 
-  // Fallback shuffle using valid moves (guaranteed solvable but may be easier)
-  const shuffleBoardWithMoves = () => {
-    const newBoard = createSolvedBoard();
-    // Much more moves for difficulty: 100-200 shuffles
-    const shuffleMoves = 100 + Math.floor(Math.random() * 100);
+  const shuffleBoard = () => generateChallengingPuzzle();
 
-    for (let i = 0; i < shuffleMoves; i++) {
-      const emptyIndex = newBoard.indexOf(0);
-      const possibleMoves = getPossibleMoves(newBoard, emptyIndex);
-      if (possibleMoves.length > 0) {
-        const randomMove =
-          possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
-        [newBoard[emptyIndex], newBoard[randomMove]] = [
-          newBoard[randomMove],
-          newBoard[emptyIndex],
-        ];
-      }
-    }
-    return newBoard;
-  };
-
-  // Shuffle board to create challenging puzzles
-  const shuffleBoard = () => {
-    return generateChallengingPuzzle();
-  };
-
-  // Get possible moves for empty space
-  const getPossibleMoves = (board, emptyIndex) => {
+  const getPossibleMoves = (b, emptyIndex) => {
     const row = Math.floor(emptyIndex / GRID_SIZE);
     const col = emptyIndex % GRID_SIZE;
-    const moves = [];
-
-    // Up
-    if (row > 0) moves.push(emptyIndex - GRID_SIZE);
-    // Down
-    if (row < GRID_SIZE - 1) moves.push(emptyIndex + GRID_SIZE);
-    // Left
-    if (col > 0) moves.push(emptyIndex - 1);
-    // Right
-    if (col < GRID_SIZE - 1) moves.push(emptyIndex + 1);
-
-    return moves;
+    const res = [];
+    if (row > 0) res.push(emptyIndex - GRID_SIZE);
+    if (row < GRID_SIZE - 1) res.push(emptyIndex + GRID_SIZE);
+    if (col > 0) res.push(emptyIndex - 1);
+    if (col < GRID_SIZE - 1) res.push(emptyIndex + 1);
+    return res;
   };
 
-  // Check if puzzle is solved (numbers 1-15 in order with empty space at end)
-  const isPuzzleSolved = (board) => {
-    for (let i = 0; i < board.length - 1; i++) {
-      if (board[i] !== i + 1) return false;
+  const isPuzzleSolved = (b) => {
+    for (let i = 0; i < b.length - 1; i++) if (b[i] !== i + 1) return false;
+    return b[b.length - 1] === 0;
+  };
+
+  // ──────────────────────────────────
+  // Code Persistent: unified submitter
+  // ──────────────────────────────────
+  const submitPersistent = useCallback(
+    (opts = {}) => {
+      if (!gameId || submittedRef.current) return;
+      const {
+        completed = false,
+        reason = "play",
+      } = opts;
+
+      const currentMoves = movesRef.current;
+      const currentTime = timerRef.current;
+
+      try {
+        // For best_time games, we send time as SCORE only when completed
+        const score = completed ? currentTime : 0;
+
+        const meta = {
+          result: completed ? "win" : "play",
+          completed,
+          reason,
+          moves: currentMoves,
+          time_s: currentTime,
+        };
+        if (completed) {
+          meta.best_time = currentTime;
+        }
+
+        gameTracker.endGame(gameId, score, meta);
+        submittedRef.current = true;
+      } catch (e) {
+        console.warn("submitPersistent failed:", e?.message || e);
+      }
+    },
+    [gameId]
+  );
+
+  // ──────────────────────────────────
+  // Initialize (stable) + mount once
+  // ──────────────────────────────────
+  const initializeGame = useCallback((reason = "restart") => {
+    // If a run was going and not submitted yet, count it as a play (no best_time)
+    if (!gameWonRef.current && (movesRef.current > 0 || timerRef.current > 0)) {
+      submittedRef.current = false; // allow submit
+      submitPersistent({ completed: false, reason });
     }
-    return board[board.length - 1] === 0;
-  };
 
-  // Initialize game
-  const initializeGame = useCallback(() => {
-    const solvedBoard = createSolvedBoard();
-    const shuffledBoard = shuffleBoard(solvedBoard);
-
-    setBoard(shuffledBoard);
+    const shuffled = shuffleBoard();
+    setBoard(shuffled);
     setMoves(0);
     setTimer(0);
     setGameStarted(true);
     setGameWon(false);
+    submittedRef.current = false; // fresh run
+  }, [submitPersistent]);
+
+  useEffect(() => {
+    // Mount: start a fresh run. We don't need gameId ready for this; submissions no-op until it is.
+    initializeGame("mount");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Timer effect
+  // ──────────────────────────────────
+  // Timer
+  // ──────────────────────────────────
   useEffect(() => {
     let interval;
     if (gameStarted && !gameWon) {
-      interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
+      interval = setInterval(() => setTimer((prev) => prev + 1), 1000);
     }
     return () => clearInterval(interval);
   }, [gameStarted, gameWon]);
 
-  // Handle tile press
+  // ──────────────────────────────────
+  // Tile press
+  // ──────────────────────────────────
   const handleTilePress = (index) => {
     if (gameWon) return;
-
     const emptyIndex = board.indexOf(0);
-    const possibleMoves = getPossibleMoves(board, emptyIndex);
+    const options = getPossibleMoves(board, emptyIndex);
+    if (!options.includes(index)) return;
 
-    if (possibleMoves.includes(index)) {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      const newBoard = [...board];
-      [newBoard[emptyIndex], newBoard[index]] = [
-        newBoard[index],
-        newBoard[emptyIndex],
-      ];
+    const newBoard = [...board];
+    [newBoard[emptyIndex], newBoard[index]] = [newBoard[index], newBoard[emptyIndex]];
+    setBoard(newBoard);
+    setMoves((m) => m + 1);
 
-      setBoard(newBoard);
-      setMoves((prev) => prev + 1);
-
-      // Check if won
-      if (isPuzzleSolved(newBoard)) {
-        setGameWon(true);
-
-        const score = Math.max(100, 1000 - moves * 5 - timer);
-
-        // End game tracking with final score
-        if (gameId) {
-          gameTracker.endGame(gameId, score);
-        }
-      }
+    // Win check (use newBoard)
+    if (isPuzzleSolved(newBoard)) {
+      setGameWon(true);
+      // Submit best_time (time is the score) once
+      submittedRef.current = false; // ensure we can submit final
+      submitPersistent({ completed: true, reason: "win" });
     }
   };
 
-  // Format time
+  // ──────────────────────────────────
+  // Back press: count as a play, reset, leave
+  // ──────────────────────────────────
+  const handleBackPress = useCallback(() => {
+    submittedRef.current = false; // allow a play submit
+    submitPersistent({ completed: false, reason: "back" });
+    // Hard reset local state so coming back is fresh
+    setBoard(createSolvedBoard());
+    setMoves(0);
+    setTimer(0);
+    setGameStarted(false);
+    setGameWon(false);
+    router.back();
+  }, [submitPersistent]);
+
+  // ──────────────────────────────────
+  // UI helpers
+  // ──────────────────────────────────
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  // Initialize game on mount
-  useEffect(() => {
-    initializeGame();
-  }, [initializeGame]);
-
-  if (!fontsLoaded) {
-    return null;
-  }
+  if (!fontsLoaded) return null;
 
   return (
     <View style={{ flex: 1 }}>
@@ -340,7 +353,7 @@ export default function SlidingPuzzleGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={handleBackPress}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -361,7 +374,7 @@ export default function SlidingPuzzleGame() {
           </Text>
 
           <TouchableOpacity
-            onPress={initializeGame}
+            onPress={() => initializeGame("restart")}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -373,12 +386,7 @@ export default function SlidingPuzzleGame() {
         </View>
 
         {/* Game stats */}
-        <View
-          style={{
-            borderRadius: 16,
-            overflow: "hidden",
-          }}
-        >
+        <View style={{ borderRadius: 16, overflow: "hidden" }}>
           <BlurView
             intensity={isDark ? 60 : 80}
             tint={isDark ? "dark" : "light"}
@@ -477,38 +485,35 @@ export default function SlidingPuzzleGame() {
               justifyContent: "space-between",
             }}
           >
-            {board.map((tile, index) => {
-              return (
-                <TouchableOpacity
-                  key={index}
-                  onPress={() => handleTilePress(index)}
-                  style={{
-                    width: TILE_SIZE,
-                    height: TILE_SIZE,
-                    borderRadius: 8,
-                    backgroundColor:
-                      tile === 0 ? "transparent" : colors.gameCard4,
-                    justifyContent: "center",
-                    alignItems: "center",
-                    marginBottom: 8,
-                    borderWidth: tile === 0 ? 0 : 1,
-                    borderColor: colors.border,
-                  }}
-                >
-                  {tile !== 0 && (
-                    <Text
-                      style={{
-                        fontFamily: "Inter_700Bold",
-                        fontSize: 24,
-                        color: colors.text,
-                      }}
-                    >
-                      {tile}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
+            {board.map((tile, index) => (
+              <TouchableOpacity
+                key={index}
+                onPress={() => handleTilePress(index)}
+                style={{
+                  width: TILE_SIZE,
+                  height: TILE_SIZE,
+                  borderRadius: 8,
+                  backgroundColor: tile === 0 ? "transparent" : colors.gameCard4,
+                  justifyContent: "center",
+                  alignItems: "center",
+                  marginBottom: 8,
+                  borderWidth: tile === 0 ? 0 : 1,
+                  borderColor: colors.border,
+                }}
+              >
+                {tile !== 0 && (
+                  <Text
+                    style={{
+                      fontFamily: "Inter_700Bold",
+                      fontSize: 24,
+                      color: colors.text,
+                    }}
+                  >
+                    {tile}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            ))}
           </View>
         </View>
 
@@ -541,7 +546,7 @@ export default function SlidingPuzzleGame() {
         </Text>
       </View>
 
-      {/* Game won overlay */}
+      {/* Win overlay */}
       {gameWon && (
         <View
           style={{
@@ -555,13 +560,7 @@ export default function SlidingPuzzleGame() {
             alignItems: "center",
           }}
         >
-          <View
-            style={{
-              borderRadius: 20,
-              overflow: "hidden",
-              margin: 20,
-            }}
-          >
+          <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
             <BlurView
               intensity={isDark ? 80 : 100}
               tint={isDark ? "dark" : "light"}
@@ -576,11 +575,7 @@ export default function SlidingPuzzleGame() {
                 alignItems: "center",
               }}
             >
-              <Trophy
-                size={48}
-                color={colors.gameAccent4}
-                style={{ marginBottom: 16 }}
-              />
+              <Trophy size={48} color={colors.gameAccent4} style={{ marginBottom: 16 }} />
 
               <Text
                 style={{
@@ -608,7 +603,7 @@ export default function SlidingPuzzleGame() {
 
               <View style={{ flexDirection: "row", gap: 12 }}>
                 <TouchableOpacity
-                  onPress={initializeGame}
+                  onPress={() => initializeGame("restart")}
                   style={{
                     backgroundColor: colors.secondaryButton,
                     paddingHorizontal: 20,
@@ -628,7 +623,7 @@ export default function SlidingPuzzleGame() {
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  onPress={() => router.back()}
+                  onPress={handleBackPress}
                   style={{
                     backgroundColor: colors.primaryButton,
                     paddingHorizontal: 20,

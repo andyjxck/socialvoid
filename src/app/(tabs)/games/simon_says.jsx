@@ -1,3 +1,4 @@
+// src/app/(tabs)/games/simon-says.jsx
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, TouchableOpacity, Dimensions, Alert } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -221,6 +222,11 @@ export default function SimonSaysGame() {
 
   // Start new game (fully resets + cancels any prior timers)
   const startNewGame = useCallback(async () => {
+    // submit current run first if restarting mid-run
+    if (currentRound > 0) {
+      submitScore(currentRound, "restart");
+    }
+
     clearAllTimers();
     const myRun = ++runIdRef.current; // invalidate previous sequences immediately
 
@@ -241,7 +247,22 @@ export default function SimonSaysGame() {
 
     console.log("🎵 Showing initial sequence:", initialSeq);
     await showSequence(initialSeq, myRun);
-  }, [delay, showSequence, clearAllTimers]);
+  }, [delay, showSequence, clearAllTimers, currentRound]);
+
+  // Submit score to tracker; only include high_score if this run beats local best
+  const submitScore = useCallback(
+    (score, reason) => {
+      if (!gameId) return;
+      const meta = { result: "play", reason };
+      if (score > bestScore) meta.high_score = score; // only send when it's actually higher
+      try {
+        gameTracker.endGame(gameId, score, meta);
+      } catch (e) {
+        console.warn("gameTracker.endGame failed:", e?.message || e);
+      }
+    },
+    [gameId, bestScore]
+  );
 
   // Handle color press
   const handleColorPress = useCallback(
@@ -277,13 +298,9 @@ export default function SimonSaysGame() {
           saveScores(bestScore, score);
         }
 
-        if (gameId) {
-          try {
-            gameTracker.endGame(gameId, score * 10);
-          } catch (e) {
-            console.warn("gameTracker.endGame failed:", e?.message || e);
-          }
-        }
+        // submit score (code persistent)
+        submitScore(score, "wrong");
+
         try {
           await Haptics.notificationAsync(
             Haptics.NotificationFeedbackType.Error
@@ -298,7 +315,7 @@ export default function SimonSaysGame() {
           }`,
           [
             { text: "Play Again", onPress: () => startNewGame() },
-            { text: "Back to Hub", onPress: () => router.back() },
+            { text: "Back to Hub", onPress: () => handleBackPress() },
           ]
         );
         return;
@@ -339,15 +356,41 @@ export default function SimonSaysGame() {
       sequence,
       currentRound,
       bestScore,
-      gameId,
       saveScores,
       startNewGame,
       flashColor,
       delay,
       showSequence,
       clearAllTimers,
+      submitScore,
     ]
   );
+
+  // Back handler (submit current score, even mid-round)
+ // Back handler → submit current score, hard reset local state, then leave
+const handleBackPress = useCallback(() => {
+  // 1) Persist the run (even mid-round)
+  submitScore(currentRound, "back");
+
+  // 2) Cancel any pending flashes/delays
+  clearAllTimers();
+
+  // 3) Invalidate any in-flight sequence playback
+  runIdRef.current += 1;
+
+  // 4) Hard reset local state so next entry starts fresh at 0
+  setSequence([]);
+  setPlayerSequence([]);
+  setCurrentRound(0);
+  setActiveColor(null);
+  setTimer(0);
+  setGameStarted(false);
+  setGameState("waiting");
+
+  // 5) Navigate away
+  router.back();
+}, [submitScore, currentRound, clearAllTimers]);
+
 
   // Format time
   const formatTime = useCallback((seconds) => {
@@ -380,7 +423,7 @@ export default function SimonSaysGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={handleBackPress}
             style={{
               padding: 8,
               borderRadius: 12,

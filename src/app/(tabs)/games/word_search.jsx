@@ -1,20 +1,21 @@
-import React, { useState, useEffect, useCallback } from "react";
+// mobile/src/app/games/WordSearchGame.jsx
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   Dimensions,
   ScrollView,
+  BackHandler,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
 import { ArrowLeft, RotateCcw, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
@@ -26,26 +27,23 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
+import { supabase } from "../../../utils/supabase"; // 🔒 persistence
 
 export default function WordSearchGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
   const queryClient = useQueryClient();
+
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // Get player ID from AsyncStorage
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
+        const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId) : 1);
       } catch (error) {
         console.error("Failed to load player ID:", error);
         setCurrentPlayerId(1);
@@ -54,26 +52,33 @@ export default function WordSearchGame() {
     loadPlayerId();
   }, []);
 
+  // ─────────────────────────────────────────────────────────────────────────────
   // Get the correct game ID and start tracking
   useEffect(() => {
+    let mounted = true;
     const setupGame = async () => {
       const id = await getGameId(GAME_TYPES.WORD_SEARCH);
-      if (id && currentPlayerId) {
+      if (id && currentPlayerId && mounted) {
         setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Word Search tracking started:", id);
+        try {
+          await gameTracker.startGame(id, currentPlayerId);
+          console.log("🎮 Word Search tracking started:", id);
+        } catch {}
       } else {
         console.error("❌ Could not get Word Search game ID or player ID");
       }
     };
     setupGame();
 
-    // Cleanup when component unmounts
     return () => {
+      mounted = false;
       if (gameId) {
-        gameTracker.endGame(gameId, foundWords.length * 100 || 0);
+        try {
+          gameTracker.endGame(gameId, foundWords.length * 100 || 0);
+        } catch {}
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPlayerId]);
 
   const [fontsLoaded] = useFonts({
@@ -83,6 +88,8 @@ export default function WordSearchGame() {
     Inter_700Bold,
   });
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GAME STATE
   const [grid, setGrid] = useState([]);
   const [wordsToFind, setWordsToFind] = useState([]);
   const [foundWords, setFoundWords] = useState([]);
@@ -94,161 +101,130 @@ export default function WordSearchGame() {
   const [placedWords, setPlacedWords] = useState([]);
 
   const GRID_SIZE = 12;
-  const CELL_SIZE = (Dimensions.get("window").width - 60) / GRID_SIZE;
 
-  // Large word list for challenging gameplay
+  // Session start timestamp (ms) for persistence duration
+  const sessionStartRef = useRef(null);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // WORD LIST
   const WORD_BANK = [
-    "JAVASCRIPT",
-    "PYTHON",
-    "REACT",
-    "ANGULAR",
-    "NODEJS",
-    "TYPESCRIPT",
-    "DATABASE",
-    "FRONTEND",
-    "BACKEND",
-    "FULLSTACK",
-    "ALGORITHM",
-    "FUNCTION",
-    "VARIABLE",
-    "CONSTANT",
-    "BOOLEAN",
-    "INTEGER",
-    "STRING",
-    "ARRAY",
-    "OBJECT",
-    "METHOD",
-    "CLASS",
-    "INTERFACE",
-    "MODULE",
-    "PACKAGE",
-    "FRAMEWORK",
-    "LIBRARY",
-    "COMPONENT",
-    "ELEMENT",
-    "ATTRIBUTE",
-    "PROPERTY",
-    "EVENT",
-    "HANDLER",
-    "CALLBACK",
-    "PROMISE",
-    "ASYNC",
-    "AWAIT",
-    "DEBUGGING",
-    "TESTING",
-    "DEPLOYMENT",
-    "VERSION",
-    "CONTROL",
-    "GITHUB",
-    "BRANCH",
-    "COMMIT",
-    "MERGE",
-    "PULL",
-    "REQUEST",
-    "ISSUE",
-    "TERMINAL",
-    "COMMAND",
-    "SCRIPT",
-    "BUILD",
-    "COMPILE",
-    "RUNTIME",
-    "MEMORY",
-    "STORAGE",
-    "NETWORK",
-    "SERVER",
-    "CLIENT",
-    "API",
-    "JSON",
-    "XML",
-    "HTTP",
-    "HTTPS",
-    "REST",
-    "GRAPHQL",
-    "AUTHENTICATION",
-    "AUTHORIZATION",
-    "SESSION",
-    "TOKEN",
-    "SECURITY",
-    "ENCRYPTION",
+    "JAVASCRIPT","PYTHON","REACT","ANGULAR","NODEJS","TYPESCRIPT","DATABASE",
+    "FRONTEND","BACKEND","FULLSTACK","ALGORITHM","FUNCTION","VARIABLE","CONSTANT",
+    "BOOLEAN","INTEGER","STRING","ARRAY","OBJECT","METHOD","CLASS","INTERFACE",
+    "MODULE","PACKAGE","FRAMEWORK","LIBRARY","COMPONENT","ELEMENT","ATTRIBUTE",
+    "PROPERTY","EVENT","HANDLER","CALLBACK","PROMISE","ASYNC","AWAIT","DEBUGGING",
+    "TESTING","DEPLOYMENT","VERSION","CONTROL","GITHUB","BRANCH","COMMIT","MERGE",
+    "PULL","REQUEST","ISSUE","TERMINAL","COMMAND","SCRIPT","BUILD","COMPILE",
+    "RUNTIME","MEMORY","STORAGE","NETWORK","SERVER","CLIENT","API","JSON","XML",
+    "HTTP","HTTPS","REST","GRAPHQL","AUTHENTICATION","AUTHORIZATION","SESSION",
+    "TOKEN","SECURITY","ENCRYPTION",
   ];
 
-  const generateRandomLetter = () => {
-    return String.fromCharCode(65 + Math.floor(Math.random() * 26));
-  };
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PERSISTENCE HELPERS (Supabase)
+  const insertGameSession = useCallback(
+    async ({ startMs, endMs, finalScore, result }) => {
+      if (!currentPlayerId || !gameId) return;
+      const startIso = new Date(startMs || Date.now()).toISOString();
+      const endIso = new Date(endMs || Date.now()).toISOString();
+      const duration = Math.max(
+        0,
+        Math.floor(((endMs || Date.now()) - (startMs || Date.now())) / 1000)
+      );
+
+      try {
+        await supabase.from("game_sessions").insert({
+          player_id: currentPlayerId,
+          game_id: gameId,
+          start_time: startIso,
+          end_time: endIso,
+          duration,
+          score: Number(finalScore || 0),
+          meta: { result }, // "win" | "loss" | "exit"
+        });
+      } catch (e) {
+        // silent fail if offline; optional queue can be added later
+      }
+    },
+    [currentPlayerId, gameId]
+  );
+
+  const updateBestTimeIfBetter = useCallback(
+    async (newTimeSeconds) => {
+      if (!currentPlayerId || !gameId) return;
+      try {
+        const { data, error } = await supabase
+          .from("player_game_stats")
+          .select("best_time")
+          .eq("player_id", currentPlayerId)
+          .eq("game_id", gameId)
+          .maybeSingle();
+
+        if (error) throw error;
+        const current = data?.best_time ?? null;
+        const isBetter = current == null || Number(newTimeSeconds) < Number(current);
+
+        if (isBetter) {
+          await supabase.from("player_game_stats").upsert({
+            player_id: currentPlayerId,
+            game_id: gameId,
+            best_time: Number(newTimeSeconds),
+          });
+        }
+      } catch (e) {
+        // ignore; can be retried later if you add a queue
+      }
+    },
+    [currentPlayerId, gameId]
+  );
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GRID GEN
+  const generateRandomLetter = () => String.fromCharCode(65 + Math.floor(Math.random() * 26));
 
   const canPlaceWord = (grid, word, row, col, direction) => {
-    const directions = {
-      horizontal: [0, 1],
-      vertical: [1, 0],
-      diagonal: [1, 1],
-      diagonalUp: [-1, 1],
-    };
-
+    const directions = { horizontal: [0, 1], vertical: [1, 0], diagonal: [1, 1], diagonalUp: [-1, 1] };
     const [dr, dc] = directions[direction];
 
     for (let i = 0; i < word.length; i++) {
       const newRow = row + dr * i;
       const newCol = col + dc * i;
-
       if (
-        newRow < 0 ||
-        newRow >= GRID_SIZE ||
-        newCol < 0 ||
-        newCol >= GRID_SIZE
-      ) {
-        return false;
-      }
-
-      if (grid[newRow][newCol] !== null && grid[newRow][newCol] !== word[i]) {
-        return false;
-      }
+        newRow < 0 || newRow >= GRID_SIZE ||
+        newCol < 0 || newCol >= GRID_SIZE
+      ) return false;
+      if (grid[newRow][newCol] !== null && grid[newRow][newCol] !== word[i]) return false;
     }
-
     return true;
   };
 
   const placeWord = (grid, word, row, col, direction) => {
-    const directions = {
-      horizontal: [0, 1],
-      vertical: [1, 0],
-      diagonal: [1, 1],
-      diagonalUp: [-1, 1],
-    };
-
+    const directions = { horizontal: [0, 1], vertical: [1, 0], diagonal: [1, 1], diagonalUp: [-1, 1] };
     const [dr, dc] = directions[direction];
     const wordData = { word, cells: [] };
-
     for (let i = 0; i < word.length; i++) {
       const newRow = row + dr * i;
       const newCol = col + dc * i;
       grid[newRow][newCol] = word[i];
       wordData.cells.push({ row: newRow, col: newCol });
     }
-
     return wordData;
   };
 
   const createWordSearchGrid = (selectedWords) => {
-    const grid = Array(GRID_SIZE)
-      .fill(null)
-      .map(() => Array(GRID_SIZE).fill(null));
+    const grid = Array(GRID_SIZE).fill(null).map(() => Array(GRID_SIZE).fill(null));
     const placedWordsData = [];
     const directions = ["horizontal", "vertical", "diagonal", "diagonalUp"];
 
-    // Sort words by length (longest first) for better placement success
     const sortedWords = [...selectedWords].sort((a, b) => b.length - a.length);
 
     sortedWords.forEach((word) => {
       let placed = false;
       let attempts = 0;
-
-      // Try much harder to place each word - especially long ones like "AUTHORIZATION"
       while (!placed && attempts < 500) {
-        const direction =
-          directions[Math.floor(Math.random() * directions.length)];
+        const direction = directions[Math.floor(Math.random() * directions.length)];
         const row = Math.floor(Math.random() * GRID_SIZE);
         const col = Math.floor(Math.random() * GRID_SIZE);
-
         if (canPlaceWord(grid, word, row, col, direction)) {
           const wordData = placeWord(grid, word, row, col, direction);
           placedWordsData.push(wordData);
@@ -256,10 +232,7 @@ export default function WordSearchGame() {
         }
         attempts++;
       }
-
-      // If we still can't place the word, force it into the first available spot
       if (!placed) {
-        console.log(`Forcing placement of word: ${word}`);
         for (let dir of directions) {
           for (let r = 0; r < GRID_SIZE && !placed; r++) {
             for (let c = 0; c < GRID_SIZE && !placed; c++) {
@@ -275,37 +248,26 @@ export default function WordSearchGame() {
       }
     });
 
-    // Fill empty cells with random letters
     for (let row = 0; row < GRID_SIZE; row++) {
       for (let col = 0; col < GRID_SIZE; col++) {
-        if (grid[row][col] === null) {
-          grid[row][col] = generateRandomLetter();
-        }
+        if (grid[row][col] === null) grid[row][col] = generateRandomLetter();
       }
     }
 
-    // Only return words that were actually placed
-    const actuallyPlacedWords = placedWordsData.map(
-      (wordData) => wordData.word
-    );
-
+    const actuallyPlacedWords = placedWordsData.map((w) => w.word);
     return { grid, placedWordsData, actuallyPlacedWords };
   };
 
   const initializeGame = useCallback(() => {
-    // Select 8-12 random words for moderate difficulty
     const numWords = 8 + Math.floor(Math.random() * 5);
     const shuffledWords = [...WORD_BANK].sort(() => 0.5 - Math.random());
     const selectedWords = shuffledWords.slice(0, numWords);
 
-    const {
-      grid: newGrid,
-      placedWordsData,
-      actuallyPlacedWords,
-    } = createWordSearchGrid(selectedWords);
+    const { grid: newGrid, placedWordsData, actuallyPlacedWords } =
+      createWordSearchGrid(selectedWords);
 
     setGrid(newGrid);
-    setWordsToFind(actuallyPlacedWords); // Only show words that were actually placed
+    setWordsToFind(actuallyPlacedWords);
     setPlacedWords(placedWordsData);
     setFoundWords([]);
     setSelectedCells([]);
@@ -313,9 +275,10 @@ export default function WordSearchGame() {
     setTimer(0);
     setGameStarted(false);
     setGameCompleted(false);
+    sessionStartRef.current = null; // reset session start
   }, []);
 
-  // Timer effect
+  // Timer
   useEffect(() => {
     let interval;
     if (gameStarted && !gameCompleted) {
@@ -326,41 +289,58 @@ export default function WordSearchGame() {
     return () => clearInterval(interval);
   }, [gameStarted, gameCompleted]);
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Back handling → submit a loss play
+  const handleExitToHub = useCallback(() => {
+    const startMs = sessionStartRef.current || Date.now();
+    const endMs = Date.now();
+
+    // record loss (best_time not updated on loss)
+    insertGameSession({
+      startMs,
+      endMs,
+      finalScore: foundWords.length * 100 || 0,
+      result: "loss",
+    });
+
+    router.back();
+    return true;
+  }, [foundWords.length, insertGameSession]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", handleExitToHub);
+    return () => sub.remove();
+  }, [handleExitToHub]);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Tapping logic
   const handleCellPress = async (row, col) => {
     if (!gameStarted) {
       setGameStarted(true);
+      sessionStartRef.current = Date.now(); // mark session start on first interaction
     }
 
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
 
     const cellKey = `${row}-${col}`;
 
     if (!startCell) {
-      // First tap - select starting letter
       setStartCell({ row, col });
       setSelectedCells([cellKey]);
     } else if (startCell.row === row && startCell.col === col) {
-      // Tap same cell to deselect
       setStartCell(null);
       setSelectedCells([]);
     } else {
-      // Second tap - select ending letter and check if valid word
-      const newSelection = getSelectionPath(
-        startCell.row,
-        startCell.col,
-        row,
-        col
-      );
+      const newSelection = getSelectionPath(startCell.row, startCell.col, row, col);
 
       if (newSelection.length >= 3) {
         const letters = newSelection
-          .map((cellKey) => {
-            const [r, c] = cellKey.split("-").map(Number);
+          .map((key) => {
+            const [r, c] = key.split("-").map(Number);
             return grid[r][c];
           })
           .join("");
 
-        // Check both forward and backward
         const reverseLetters = letters.split("").reverse().join("");
 
         const foundWord = wordsToFind.find(
@@ -370,36 +350,44 @@ export default function WordSearchGame() {
         );
 
         if (foundWord) {
-          setFoundWords([...foundWords, foundWord]);
+          const updated = [...foundWords, foundWord];
+          setFoundWords(updated);
           setSelectedCells([]);
           setStartCell(null);
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
 
-          // Check if all words found
-          if (foundWords.length + 1 === wordsToFind.length) {
+          // If all words are found → win
+          if (updated.length === wordsToFind.length) {
             setGameCompleted(true);
 
-            const score = Math.max(
-              100,
-              1000 - timer * 2 + foundWords.length * 50
-            );
+            const score = Math.max(100, 1000 - timer * 2 + foundWords.length * 50);
 
-            // End game tracking with final score
+            // Persistence on WIN:
+            const startMs = sessionStartRef.current || Date.now();
+            const endMs = Date.now();
+            insertGameSession({
+              startMs,
+              endMs,
+              finalScore: score,
+              result: "win",
+            });
+            // Best time tracking — only if completed
+            updateBestTimeIfBetter(timer);
+
             if (gameId) {
-              await gameTracker.endGame(gameId, score);
+              try {
+                await gameTracker.endGame(gameId, score);
+              } catch {}
             }
           }
         } else {
-          // Not a valid word - just update selection preview
           setSelectedCells(newSelection);
-          // Auto-clear after a moment
           setTimeout(() => {
             setSelectedCells([]);
             setStartCell(null);
           }, 1000);
         }
       } else {
-        // Reset if selection too short
         setSelectedCells([]);
         setStartCell(null);
       }
@@ -411,62 +399,43 @@ export default function WordSearchGame() {
     const deltaRow = endRow - startRow;
     const deltaCol = endCol - startCol;
 
-    // Check if it's a valid straight line (horizontal, vertical, or diagonal)
     if (deltaRow === 0) {
-      // Horizontal
       const step = deltaCol > 0 ? 1 : -1;
-      for (let c = startCol; c !== endCol + step; c += step) {
-        path.push(`${startRow}-${c}`);
-      }
+      for (let c = startCol; c !== endCol + step; c += step) path.push(`${startRow}-${c}`);
     } else if (deltaCol === 0) {
-      // Vertical
       const step = deltaRow > 0 ? 1 : -1;
-      for (let r = startRow; r !== endRow + step; r += step) {
-        path.push(`${r}-${startCol}`);
-      }
+      for (let r = startRow; r !== endRow + step; r += step) path.push(`${r}-${startCol}`);
     } else if (Math.abs(deltaRow) === Math.abs(deltaCol)) {
-      // Diagonal
       const stepRow = deltaRow > 0 ? 1 : -1;
       const stepCol = deltaCol > 0 ? 1 : -1;
       const distance = Math.abs(deltaRow);
-
       for (let i = 0; i <= distance; i++) {
         path.push(`${startRow + i * stepRow}-${startCol + i * stepCol}`);
       }
     }
-
     return path;
   };
 
   const getCellBackground = (row, col) => {
     const cellKey = `${row}-${col}`;
+    if (selectedCells.includes(cellKey)) return colors.gameAccent10 + "60";
 
-    if (selectedCells.includes(cellKey)) {
-      return colors.gameAccent10 + "60";
-    }
-
-    // Check if part of found word - use pastel red highlighting
     const isPartOfFoundWord = placedWords.some(
       (wordData) =>
         foundWords.includes(wordData.word) &&
         wordData.cells.some((cell) => cell.row === row && cell.col === col)
     );
-
-    if (isPartOfFoundWord) {
-      return "#FFB3B3"; // Pastel red highlight for found words
-    }
-
+    if (isPartOfFoundWord) return "#FFB3B3";
     return colors.gameCard10;
   };
 
-  // Check if a cell is part of any found word (for strikethrough)
-  const isCellPartOfFoundWord = (row, col) => {
-    return placedWords.some(
+  // (kept for potential styling use)
+  const isCellPartOfFoundWord = (row, col) =>
+    placedWords.some(
       (wordData) =>
         foundWords.includes(wordData.word) &&
         wordData.cells.some((cell) => cell.row === row && cell.col === col)
     );
-  };
 
   const formatTime = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -478,15 +447,13 @@ export default function WordSearchGame() {
     initializeGame();
   }, [initializeGame]);
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  if (!fontsLoaded) return null;
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // UI
   return (
     <View style={{ flex: 1 }}>
       <StatusBar style={isDark ? "light" : "dark"} />
-
-      {/* Night sky background */}
       <NightSkyBackground />
 
       <View
@@ -505,7 +472,7 @@ export default function WordSearchGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={handleExitToHub}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -626,7 +593,7 @@ export default function WordSearchGame() {
                   key={word}
                   style={{
                     backgroundColor: foundWords.includes(word)
-                      ? "#FFB3B3" // Pastel red highlight for found words
+                      ? "#FFB3B3"
                       : "transparent",
                     paddingHorizontal: foundWords.includes(word) ? 8 : 0,
                     paddingVertical: foundWords.includes(word) ? 4 : 0,
@@ -638,9 +605,7 @@ export default function WordSearchGame() {
                     style={{
                       fontFamily: "Inter_600SemiBold",
                       fontSize: 12,
-                      color: foundWords.includes(word)
-                        ? "#333333" // Darker text on the pastel red background
-                        : colors.text,
+                      color: foundWords.includes(word) ? "#333333" : colors.text,
                       opacity: foundWords.includes(word) ? 0.8 : 1,
                     }}
                   >
@@ -671,13 +636,7 @@ export default function WordSearchGame() {
           }}
         >
           {grid.map((row, rowIndex) => (
-            <View
-              key={rowIndex}
-              style={{
-                flexDirection: "row",
-                flex: 1,
-              }}
-            >
+            <View key={rowIndex} style={{ flexDirection: "row", flex: 1 }}>
               {row.map((letter, colIndex) => (
                 <TouchableOpacity
                   key={`${rowIndex}-${colIndex}`}
@@ -717,8 +676,7 @@ export default function WordSearchGame() {
             paddingHorizontal: 20,
           }}
         >
-          Tap the first letter, then tap the last letter of each word to select
-          it!
+          Tap the first letter, then tap the last letter of each word to select it!
         </Text>
       </View>
 
@@ -736,13 +694,7 @@ export default function WordSearchGame() {
             alignItems: "center",
           }}
         >
-          <View
-            style={{
-              borderRadius: 20,
-              overflow: "hidden",
-              margin: 20,
-            }}
-          >
+          <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
             <BlurView
               intensity={isDark ? 80 : 100}
               tint={isDark ? "dark" : "light"}
@@ -757,11 +709,7 @@ export default function WordSearchGame() {
                 alignItems: "center",
               }}
             >
-              <Trophy
-                size={48}
-                color={colors.gameAccent10}
-                style={{ marginBottom: 16 }}
-              />
+              <Trophy size={48} color={colors.gameAccent10} style={{ marginBottom: 16 }} />
 
               <Text
                 style={{
@@ -809,7 +757,7 @@ export default function WordSearchGame() {
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  onPress={() => router.back()}
+                  onPress={handleExitToHub}
                   style={{
                     backgroundColor: colors.primaryButton,
                     paddingHorizontal: 20,

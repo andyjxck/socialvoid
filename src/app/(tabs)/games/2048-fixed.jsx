@@ -1,31 +1,20 @@
-import React, { useState, useEffect, useCallback } from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  PanGestureHandler,
-  Dimensions,
-  Alert,
-} from "react-native";
+// src/app/(tabs)/games/2048.jsx
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import { View, Text, TouchableOpacity, Dimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import {
-  ArrowLeft,
-  RotateCcw,
-  Trophy,
-  Target,
-  Clock,
-} from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import {
   GestureHandlerRootView,
   PanGestureHandler as RNPanGestureHandler,
 } from "react-native-gesture-handler";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "@react-navigation/native";
+
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
@@ -38,63 +27,31 @@ import {
 } from "@expo-google-fonts/inter";
 
 const { width: screenWidth } = Dimensions.get("window");
+const GRID_SIZE = 4;
 
 export default function Game2048() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
-  const [currentPlayerId, setCurrentPlayerId] = useState(null);
+
+  // IDs
+  const [playerId, setPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const gameIdRef = useRef(null);
 
-  // Get player ID from AsyncStorage
-  useEffect(() => {
-    const loadPlayerId = async () => {
-      try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
-        setCurrentPlayerId(1);
-      }
-    };
-    loadPlayerId();
-  }, []);
+  // Game state
+  const [board, setBoard] = useState([]);
+  const [score, setScore] = useState(0);
+  const scoreRef = useRef(0);
+  const [timer, setTimer] = useState(0);
+  const [gameOver, setGameOver] = useState(false);
+  const [gameWon, setGameWon] = useState(false);
+  const [gestureHandled, setGestureHandled] = useState(false);
 
-  // Get the correct game ID and start tracking
-  useEffect(() => {
-    let mounted = true;
-    let currentGameId = null;
+  // timer + “submit once” guards
+  const intervalRef = useRef(null);
+  const submittedRef = useRef(false);
 
-    const setupGame = async () => {
-      if (!currentPlayerId) return;
-
-      const id = await getGameId(GAME_TYPES.TWENTY48);
-      if (id && currentPlayerId && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 2048 Fixed tracking started:", id);
-      } else if (mounted) {
-        console.error("❌ Could not get 2048 Fixed game ID or player ID");
-      }
-    };
-
-    setupGame();
-
-    // Cleanup when component unmounts or effect re-runs
-    return () => {
-      mounted = false;
-      if (currentGameId) {
-        gameTracker.endGame(currentGameId, 0);
-      }
-    };
-  }, [currentPlayerId]);
-
+  // fonts
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -102,115 +59,155 @@ export default function Game2048() {
     Inter_700Bold,
   });
 
-  // Game state
-  const [board, setBoard] = useState([]);
-  const [score, setScore] = useState(0);
-  const [bestScore, setBestScore] = useState(0);
-  const [timer, setTimer] = useState(0);
-  const [gameStarted, setGameStarted] = useState(false);
-  const [gameOver, setGameOver] = useState(false);
-  const [gameWon, setGameWon] = useState(false);
-  const [gestureHandled, setGestureHandled] = useState(false);
+  // keep refs in sync
+  useEffect(() => {
+    scoreRef.current = score;
+  }, [score]);
+  useEffect(() => {
+    gameIdRef.current = gameId;
+  }, [gameId]);
 
-  const GRID_SIZE = 4;
-  const TILE_SIZE = (screenWidth - 80) / GRID_SIZE - 8;
-
-  // Initialize empty board
-  const createEmptyBoard = () => {
-    return Array(GRID_SIZE)
+  // ---------------- helpers ----------------
+  const createEmptyBoard = () =>
+    Array(GRID_SIZE)
       .fill(null)
       .map(() => Array(GRID_SIZE).fill(0));
-  };
 
-  // Add random tile with progressive spawning
   const addRandomTile = (currentBoard) => {
-    const emptyCells = [];
+    const empty = [];
     for (let i = 0; i < GRID_SIZE; i++) {
       for (let j = 0; j < GRID_SIZE; j++) {
-        if (currentBoard[i][j] === 0) {
-          emptyCells.push({ row: i, col: j });
-        }
+        if (currentBoard[i][j] === 0) empty.push({ row: i, col: j });
+      }
+    }
+    if (!empty.length) return currentBoard;
+
+    const pick = empty[Math.floor(Math.random() * empty.length)];
+    const highest = Math.max(...currentBoard.flat());
+
+    const available = [
+      { value: 2, weight: 70 },
+      { value: 4, weight: 25 },
+      ...(highest >= 128 ? [{ value: 8, weight: 4 }] : []),
+      ...(highest >= 256 ? [{ value: 16, weight: 0.8 }] : []),
+      ...(highest >= 512 ? [{ value: 32, weight: 0.2 }] : []),
+    ];
+    const total = available.reduce((s, t) => s + t.weight, 0);
+    let r = Math.random() * total;
+    let val = 2;
+    for (const t of available) {
+      r -= t.weight;
+      if (r <= 0) {
+        val = t.value;
+        break;
       }
     }
 
-    if (emptyCells.length > 0) {
-      const randomCell =
-        emptyCells[Math.floor(Math.random() * emptyCells.length)];
-
-      // Find highest tile on board to determine what we can spawn
-      const highestTile = Math.max(...currentBoard.flat());
-
-      // Progressive tile spawning based on achievements
-      const availableTiles = [];
-
-      // Always available
-      availableTiles.push({ value: 2, weight: 70 });
-      availableTiles.push({ value: 4, weight: 25 });
-
-      // Unlock 8 when player has achieved 128
-      if (highestTile >= 128) {
-        availableTiles.push({ value: 8, weight: 4 });
-      }
-
-      // Unlock 16 when player has achieved 256
-      if (highestTile >= 256) {
-        availableTiles.push({ value: 16, weight: 0.8 });
-      }
-
-      // Unlock 32 when player has achieved 512
-      if (highestTile >= 512) {
-        availableTiles.push({ value: 32, weight: 0.2 });
-      }
-
-      // Select tile based on weighted probability
-      const totalWeight = availableTiles.reduce(
-        (sum, tile) => sum + tile.weight,
-        0
-      );
-      let random = Math.random() * totalWeight;
-
-      let selectedValue = 2;
-      for (const tile of availableTiles) {
-        random -= tile.weight;
-        if (random <= 0) {
-          selectedValue = tile.value;
-          break;
-        }
-      }
-
-      const newBoard = currentBoard.map((row) => [...row]);
-      newBoard[randomCell.row][randomCell.col] = selectedValue;
-      return newBoard;
-    }
-    return currentBoard;
+    const next = currentBoard.map((row) => [...row]);
+    next[pick.row][pick.col] = val;
+    return next;
   };
 
-  // Initialize game
   const initializeGame = useCallback(() => {
-    let newBoard = createEmptyBoard();
-    newBoard = addRandomTile(newBoard);
-    newBoard = addRandomTile(newBoard);
-
-    setBoard(newBoard);
+    // fresh board + local state reset
+    let b = createEmptyBoard();
+    b = addRandomTile(b);
+    b = addRandomTile(b);
+    setBoard(b);
     setScore(0);
     setTimer(0);
-    setGameStarted(true);
     setGameOver(false);
     setGameWon(false);
+    setGestureHandled(false);
+    submittedRef.current = false; // allow a future submit
   }, []);
 
-  // Timer effect
+  // ---------------- IDs bootstrap ----------------
   useEffect(() => {
-    let interval;
-    if (gameStarted && !gameOver && !gameWon) {
-      interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [gameStarted, gameOver, gameWon]);
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch {
+        setPlayerId(1);
+      }
+    })();
+  }, []);
 
-  // Move tiles in direction
+  // ---------------- focus/blur lifecycle ----------------
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+
+      const start = async () => {
+        if (!playerId) return;
+        const id = await getGameId(GAME_TYPES.TWENTY48);
+        if (!isActive) return;
+
+        setGameId(id);
+        // start tracking & start fresh run
+        await gameTracker.startGame(id, playerId);
+        initializeGame();
+
+        // start timer
+        if (!intervalRef.current) {
+          intervalRef.current = setInterval(() => {
+            setTimer((t) => t + 1);
+          }, 1000);
+        }
+      };
+
+      start();
+
+      // on blur/unfocus → stop timer + submit once with current score
+      return () => {
+        isActive = false;
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        const gid = gameIdRef.current;
+        if (gid && playerId && !submittedRef.current) {
+          submittedRef.current = true;
+          // fire-and-forget to avoid blocking nav
+          gameTracker.endGame(gid, scoreRef.current, { reason: "blur" });
+        }
+      };
+    }, [playerId, initializeGame]) // ← don't depend on score/gameId to avoid accidental cleanups
+  );
+
+  // ---------------- back button ----------------
+  const handleBack = async () => {
+    try {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (gameIdRef.current && playerId && !submittedRef.current) {
+        submittedRef.current = true;
+        await gameTracker.endGame(gameIdRef.current, scoreRef.current, { reason: "back_button" });
+      }
+    } catch {}
+    router.back();
+  };
+
+  // ---------------- gameplay ----------------
+  const isGameOver = (b) => {
+    // empty cell?
+    for (let i = 0; i < GRID_SIZE; i++) {
+      for (let j = 0; j < GRID_SIZE; j++) if (b[i][j] === 0) return false;
+    }
+    // merges available?
+    for (let i = 0; i < GRID_SIZE; i++) {
+      for (let j = 0; j < GRID_SIZE; j++) {
+        const v = b[i][j];
+        if ((i < GRID_SIZE - 1 && v === b[i + 1][j]) || (j < GRID_SIZE - 1 && v === b[i][j + 1]))
+          return false;
+      }
+    }
+    return true;
+  };
+
   const moveTiles = async (direction) => {
     if (gameOver || gameWon) return;
 
@@ -219,172 +216,98 @@ export default function Game2048() {
     let moved = false;
 
     const slideArray = (arr) => {
-      // Remove zeros
-      let filtered = arr.filter((val) => val !== 0);
-
-      // Merge adjacent equal values
+      let filtered = arr.filter((v) => v !== 0);
       for (let i = 0; i < filtered.length - 1; i++) {
         if (filtered[i] === filtered[i + 1]) {
           filtered[i] *= 2;
           filtered[i + 1] = 0;
           newScore += filtered[i];
-
-          // Check for win condition
-          if (filtered[i] === 2048 && !gameWon) {
-            setGameWon(true);
-          }
+          if (filtered[i] === 2048 && !gameWon) setGameWon(true);
         }
       }
-
-      // Remove zeros again after merging
-      filtered = filtered.filter((val) => val !== 0);
-
-      // Pad with zeros
-      while (filtered.length < GRID_SIZE) {
-        filtered.push(0);
-      }
-
+      filtered = filtered.filter((v) => v !== 0);
+      while (filtered.length < GRID_SIZE) filtered.push(0);
       return filtered;
     };
 
     if (direction === "left") {
       for (let i = 0; i < GRID_SIZE; i++) {
-        const originalRow = [...newBoard[i]];
-        newBoard[i] = slideArray(newBoard[i]);
-        if (JSON.stringify(originalRow) !== JSON.stringify(newBoard[i])) {
-          moved = true;
-        }
+        const row = newBoard[i];
+        const next = slideArray(row);
+        if (JSON.stringify(row) !== JSON.stringify(next)) moved = true;
+        newBoard[i] = next;
       }
     } else if (direction === "right") {
       for (let i = 0; i < GRID_SIZE; i++) {
-        const originalRow = [...newBoard[i]];
-        newBoard[i] = slideArray(newBoard[i].reverse()).reverse();
-        if (JSON.stringify(originalRow) !== JSON.stringify(newBoard[i])) {
-          moved = true;
-        }
+        const row = newBoard[i];
+        const next = slideArray([...row].reverse()).reverse();
+        if (JSON.stringify(row) !== JSON.stringify(next)) moved = true;
+        newBoard[i] = next;
       }
     } else if (direction === "up") {
       for (let j = 0; j < GRID_SIZE; j++) {
-        const column = [];
-        for (let i = 0; i < GRID_SIZE; i++) {
-          column.push(newBoard[i][j]);
-        }
-        const originalColumn = [...column];
-        const newColumn = slideArray(column);
-        for (let i = 0; i < GRID_SIZE; i++) {
-          newBoard[i][j] = newColumn[i];
-        }
-        if (JSON.stringify(originalColumn) !== JSON.stringify(newColumn)) {
-          moved = true;
-        }
+        const col = [];
+        for (let i = 0; i < GRID_SIZE; i++) col.push(newBoard[i][j]);
+        const next = slideArray(col);
+        for (let i = 0; i < GRID_SIZE; i++) newBoard[i][j] = next[i];
+        if (JSON.stringify(col) !== JSON.stringify(next)) moved = true;
       }
     } else if (direction === "down") {
       for (let j = 0; j < GRID_SIZE; j++) {
-        const column = [];
-        for (let i = 0; i < GRID_SIZE; i++) {
-          column.push(newBoard[i][j]);
-        }
-        const originalColumn = [...column];
-        const newColumn = slideArray(column.reverse()).reverse();
-        for (let i = 0; i < GRID_SIZE; i++) {
-          newBoard[i][j] = newColumn[i];
-        }
-        if (JSON.stringify(originalColumn) !== JSON.stringify(newColumn)) {
-          moved = true;
-        }
+        const col = [];
+        for (let i = 0; i < GRID_SIZE; i++) col.push(newBoard[i][j]);
+        const next = slideArray(col.reverse()).reverse();
+        for (let i = 0; i < GRID_SIZE; i++) newBoard[i][j] = next[i];
+        if (JSON.stringify(col) !== JSON.stringify(next.slice().reverse())) moved = true;
       }
     }
 
-    if (moved) {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      newBoard = addRandomTile(newBoard);
-      setBoard(newBoard);
-      setScore(newScore);
+    if (!moved) return;
 
-      // Check if best score
-      if (newScore > bestScore) {
-        setBestScore(newScore);
+    await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    newBoard = addRandomTile(newBoard);
+    setBoard(newBoard);
+    setScore(newScore);
+
+    if (isGameOver(newBoard)) {
+      setGameOver(true);
+      // stop timer & submit once
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
-
-      // Check for game over
-      if (isGameOver(newBoard)) {
-        setGameOver(true);
-
-        // End game tracking with final score
-        if (gameId) {
-          await gameTracker.endGame(gameId, newScore);
-        }
+      if (gameIdRef.current && playerId && !submittedRef.current) {
+        submittedRef.current = true;
+        await gameTracker.endGame(gameIdRef.current, newScore, { reason: "game_over" });
       }
     }
   };
 
-  // Check if game is over
-  const isGameOver = (currentBoard) => {
-    // Check for empty cells
-    for (let i = 0; i < GRID_SIZE; i++) {
-      for (let j = 0; j < GRID_SIZE; j++) {
-        if (currentBoard[i][j] === 0) return false;
-      }
-    }
-
-    // Check for possible merges
-    for (let i = 0; i < GRID_SIZE; i++) {
-      for (let j = 0; j < GRID_SIZE; j++) {
-        const current = currentBoard[i][j];
-        if (
-          (i < GRID_SIZE - 1 && current === currentBoard[i + 1][j]) ||
-          (j < GRID_SIZE - 1 && current === currentBoard[i][j + 1])
-        ) {
-          return false;
-        }
-      }
-    }
-
-    return true;
+  // gestures
+  const onHandlerStateChange = () => {
+    // reset swipe gate on any state change (simple & robust)
+    setGestureHandled(false);
   };
 
-  // Handle gesture start
-  const onHandlerStateChange = ({ nativeEvent }) => {
-    if (nativeEvent.state === 1) {
-      // BEGIN
-      setGestureHandled(false);
-    } else if (nativeEvent.state === 5) {
-      // END
-      setGestureHandled(false);
-    }
-  };
-
-  // Handle gesture
   const onGestureEvent = ({ nativeEvent }) => {
     if (gestureHandled) return;
-
     const { translationX, translationY } = nativeEvent;
-    const absX = Math.abs(translationX);
-    const absY = Math.abs(translationY);
+    const ax = Math.abs(translationX);
+    const ay = Math.abs(translationY);
     const threshold = 50;
 
-    if (absX > threshold || absY > threshold) {
+    if (ax > threshold || ay > threshold) {
       setGestureHandled(true);
-
-      if (absX > absY) {
-        // Horizontal swipe
-        if (translationX > 0) {
-          moveTiles("right");
-        } else {
-          moveTiles("left");
-        }
+      if (ax > ay) {
+        translationX > 0 ? moveTiles("right") : moveTiles("left");
       } else {
-        // Vertical swipe
-        if (translationY > 0) {
-          moveTiles("down");
-        } else {
-          moveTiles("up");
-        }
+        translationY > 0 ? moveTiles("down") : moveTiles("up");
       }
     }
   };
 
-  // Get tile color
+  // styles helpers
   const getTileColor = (value) => {
     const tileColors = {
       2: "#EEE4DA",
@@ -401,44 +324,20 @@ export default function Game2048() {
     };
     return tileColors[value] || "#3C4043";
   };
+  const getTextColor = (value) => (value <= 4 ? "#776E65" : "#FFFFFF");
+  const formatTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
-  // Get text color
-  const getTextColor = (value) => {
-    return value <= 4 ? "#776E65" : "#FFFFFF";
-  };
-
-  // Format time
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  // Initialize game on mount
-  useEffect(() => {
-    initializeGame();
-  }, [initializeGame]);
-
-  if (!fontsLoaded) {
-    return null;
-  }
+  // fonts gate
+  if (!fontsLoaded) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
         <StatusBar style={isDark ? "light" : "dark"} />
-
-        {/* Night sky background gradient */}
         <NightSkyBackground />
 
         {/* Header */}
-        <View
-          style={{
-            paddingTop: insets.top + 16,
-            paddingHorizontal: 20,
-            marginBottom: 20,
-          }}
-        >
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, marginBottom: 20 }}>
           <View
             style={{
               flexDirection: "row",
@@ -448,7 +347,7 @@ export default function Game2048() {
             }}
           >
             <TouchableOpacity
-              onPress={() => router.back()}
+              onPress={handleBack}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -458,18 +357,23 @@ export default function Game2048() {
               <ArrowLeft size={24} color={colors.text} />
             </TouchableOpacity>
 
-            <Text
-              style={{
-                fontFamily: "Inter_700Bold",
-                fontSize: 20,
-                color: colors.text,
-              }}
-            >
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: colors.text }}>
               2048
             </Text>
 
             <TouchableOpacity
-              onPress={initializeGame}
+              onPress={() => {
+                // hard reset local run (does NOT submit)
+                if (intervalRef.current) {
+                  clearInterval(intervalRef.current);
+                  intervalRef.current = null;
+                }
+                initializeGame();
+                // restart timer
+                intervalRef.current = setInterval(() => {
+                  setTimer((t) => t + 1);
+                }, 1000);
+              }}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -481,19 +385,12 @@ export default function Game2048() {
           </View>
 
           {/* Game stats */}
-          <View
-            style={{
-              borderRadius: 16,
-              overflow: "hidden",
-            }}
-          >
+          <View style={{ borderRadius: 16, overflow: "hidden" }}>
             <BlurView
               intensity={isDark ? 60 : 80}
               tint={isDark ? "dark" : "light"}
               style={{
-                backgroundColor: isDark
-                  ? "rgba(31, 41, 55, 0.7)"
-                  : "rgba(255, 255, 255, 0.7)",
+                backgroundColor: isDark ? "rgba(31,41,55,0.7)" : "rgba(255,255,255,0.7)",
                 borderWidth: 1,
                 borderColor: colors.border,
                 borderRadius: 16,
@@ -520,13 +417,7 @@ export default function Game2048() {
                   >
                     Score
                   </Text>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_700Bold",
-                      fontSize: 18,
-                      color: colors.gameAccent3,
-                    }}
-                  >
+                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent3 }}>
                     {score.toLocaleString()}
                   </Text>
                 </View>
@@ -544,13 +435,7 @@ export default function Game2048() {
                   >
                     Best Tile
                   </Text>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_700Bold",
-                      fontSize: 18,
-                      color: colors.text,
-                    }}
-                  >
+                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.text }}>
                     {Math.max(...board.flat()) || 0}
                   </Text>
                 </View>
@@ -568,13 +453,7 @@ export default function Game2048() {
                   >
                     Time
                   </Text>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_700Bold",
-                      fontSize: 18,
-                      color: colors.text,
-                    }}
-                  >
+                  <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.text }}>
                     {formatTime(timer)}
                   </Text>
                 </View>
@@ -583,11 +462,8 @@ export default function Game2048() {
           </View>
         </View>
 
-        {/* Game board */}
-        <RNPanGestureHandler
-          onGestureEvent={onGestureEvent}
-          onHandlerStateChange={onHandlerStateChange}
-        >
+        {/* Board */}
+        <RNPanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange}>
           <View
             style={{
               flex: 1,
@@ -606,37 +482,29 @@ export default function Game2048() {
                 alignSelf: "center",
               }}
             >
-              {board.map((row, rowIndex) => (
-                <View
-                  key={rowIndex}
-                  style={{
-                    flexDirection: "row",
-                    flex: 1,
-                  }}
-                >
-                  {row.map((value, colIndex) => (
+              {board.map((row, i) => (
+                <View key={i} style={{ flexDirection: "row", flex: 1 }}>
+                  {row.map((val, j) => (
                     <View
-                      key={`${rowIndex}-${colIndex}`}
+                      key={`${i}-${j}`}
                       style={{
                         flex: 1,
                         margin: 4,
                         borderRadius: 8,
-                        backgroundColor:
-                          value === 0 ? colors.border : getTileColor(value),
+                        backgroundColor: val === 0 ? colors.border : getTileColor(val),
                         justifyContent: "center",
                         alignItems: "center",
                       }}
                     >
-                      {value !== 0 && (
+                      {val !== 0 && (
                         <Text
                           style={{
                             fontFamily: "Inter_700Bold",
-                            fontSize:
-                              value >= 1000 ? 16 : value >= 100 ? 20 : 24,
-                            color: getTextColor(value),
+                            fontSize: val >= 1000 ? 16 : val >= 100 ? 20 : 24,
+                            color: getTextColor(val),
                           }}
                         >
-                          {value}
+                          {val}
                         </Text>
                       )}
                     </View>
@@ -645,7 +513,6 @@ export default function Game2048() {
               ))}
             </View>
 
-            {/* Instructions */}
             <Text
               style={{
                 fontFamily: "Inter_500Medium",
@@ -655,13 +522,12 @@ export default function Game2048() {
                 marginTop: 20,
               }}
             >
-              Swipe to move tiles. Combine tiles with the same number to reach
-              2048!
+              Swipe to move tiles. Combine tiles with the same number to reach 2048!
             </Text>
           </View>
         </RNPanGestureHandler>
 
-        {/* Game over overlay */}
+        {/* Overlay */}
         {(gameOver || gameWon) && (
           <View
             style={{
@@ -670,25 +536,17 @@ export default function Game2048() {
               left: 0,
               right: 0,
               bottom: 0,
-              backgroundColor: "rgba(0, 0, 0, 0.7)",
+              backgroundColor: "rgba(0,0,0,0.7)",
               justifyContent: "center",
               alignItems: "center",
             }}
           >
-            <View
-              style={{
-                borderRadius: 20,
-                overflow: "hidden",
-                margin: 20,
-              }}
-            >
+            <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
               <BlurView
                 intensity={isDark ? 80 : 100}
                 tint={isDark ? "dark" : "light"}
                 style={{
-                  backgroundColor: isDark
-                    ? "rgba(31, 41, 55, 0.9)"
-                    : "rgba(255, 255, 255, 0.9)",
+                  backgroundColor: isDark ? "rgba(31,41,55,0.9)" : "rgba(255,255,255,0.9)",
                   borderWidth: 1,
                   borderColor: colors.border,
                   borderRadius: 20,
@@ -701,7 +559,6 @@ export default function Game2048() {
                   color={gameWon ? colors.gameAccent5 : colors.gameAccent3}
                   style={{ marginBottom: 16 }}
                 />
-
                 <Text
                   style={{
                     fontFamily: "Inter_700Bold",
@@ -713,7 +570,6 @@ export default function Game2048() {
                 >
                   {gameWon ? "You Win!" : "Game Over"}
                 </Text>
-
                 <Text
                   style={{
                     fontFamily: "Inter_600SemiBold",
@@ -727,7 +583,17 @@ export default function Game2048() {
 
                 <View style={{ flexDirection: "row", gap: 12 }}>
                   <TouchableOpacity
-                    onPress={initializeGame}
+                    onPress={() => {
+                      // restart run (no submit)
+                      if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                        intervalRef.current = null;
+                      }
+                      initializeGame();
+                      intervalRef.current = setInterval(() => {
+                        setTimer((t) => t + 1);
+                      }, 1000);
+                    }}
                     style={{
                       backgroundColor: colors.secondaryButton,
                       paddingHorizontal: 20,
@@ -736,18 +602,14 @@ export default function Game2048() {
                     }}
                   >
                     <Text
-                      style={{
-                        fontFamily: "Inter_600SemiBold",
-                        fontSize: 14,
-                        color: colors.secondaryButtonText,
-                      }}
+                      style={{ fontFamily: "Inter_600SemiBold", fontSize: 14, color: colors.secondaryButtonText }}
                     >
                       Play Again
                     </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    onPress={() => router.back()}
+                    onPress={handleBack}
                     style={{
                       backgroundColor: colors.primaryButton,
                       paddingHorizontal: 20,
@@ -756,11 +618,7 @@ export default function Game2048() {
                     }}
                   >
                     <Text
-                      style={{
-                        fontFamily: "Inter_600SemiBold",
-                        fontSize: 14,
-                        color: colors.primaryButtonText,
-                      }}
+                      style={{ fontFamily: "Inter_600SemiBold", fontSize: 14, color: colors.primaryButtonText }}
                     >
                       Back to Hub
                     </Text>

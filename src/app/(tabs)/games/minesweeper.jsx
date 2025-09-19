@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from "react";
+// src/app/(tabs)/games/minesweeper.jsx
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, TouchableOpacity, Dimensions, Alert } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,8 +10,6 @@ import { router } from "expo-router";
 import {
   ArrowLeft,
   RotateCcw,
-  Trophy,
-  Settings,
   Flag,
   Bomb,
 } from "lucide-react-native";
@@ -38,58 +37,68 @@ const DIFFICULTIES = {
 export default function MinesweeperGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
-  const [currentPlayerId, setCurrentPlayerId] = useState(null);
-  const [gameId, setGameId] = useState(null);
 
-  // Get player ID from AsyncStorage
+  // ───────────────────────────────
+  // IDs & session tracking (numeric game_id, separate sessionId)
+  // ───────────────────────────────
+  const [playerId, setPlayerId] = useState(null);
+  const [gameTypeId, setGameTypeId] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const submittedRef = useRef(false); // guard to avoid double submit
+
+  // Player id from storage (fallback to 1)
   useEffect(() => {
-    const loadPlayerId = async () => {
+    (async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id",
-        );
-        if (savedPlayerId) {
-          setCurrentPlayerId(parseInt(savedPlayerId));
-        } else {
-          setCurrentPlayerId(1);
-        }
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
-        setCurrentPlayerId(1);
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch (e) {
+        setPlayerId(1);
       }
-    };
-    loadPlayerId();
+    })();
   }, []);
 
-  // Get the correct game ID and start tracking
+  // Resolve numeric game id and start a session; ensure we end session on unmount if not submitted
   useEffect(() => {
-    let mounted = true;
-    let currentGameId = null;
+    let alive = true;
+    let localSession = null;
 
-    const setupGame = async () => {
-      if (!currentPlayerId) return;
+    (async () => {
+      if (!playerId) return;
+      try {
+        const id = await getGameId(GAME_TYPES.MINESWEEPER); // numeric id only
+        if (!alive) return;
+        setGameTypeId(id);
 
-      const id = await getGameId(GAME_TYPES.MINESWEEPER);
-      if (id && currentPlayerId && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Minesweeper tracking started:", id);
-      } else if (mounted) {
-        console.error("❌ Could not get Minesweeper game ID or player ID");
+        // Start session and keep its id (some implementations return sessionId; fallback to gameTypeId)
+        const started = await gameTracker.startGame(id, playerId);
+        if (!alive) return;
+        localSession = started || id;
+        setSessionId(localSession);
+        submittedRef.current = false;
+      } catch (e) {
+        console.warn("Minesweeper startGame failed:", e);
       }
-    };
+    })();
 
-    setupGame();
-
-    // Cleanup when component unmounts or effect re-runs
     return () => {
-      mounted = false;
-      if (currentGameId) {
-        gameTracker.endGame(currentGameId, 0);
+      alive = false;
+      // If component unmounts without a final submit, count as a play (not completed, no best_time)
+      if (localSession && !submittedRef.current) {
+        try {
+          submittedRef.current = true;
+          gameTracker.endGame(localSession, 0, {
+            result: "play",
+            cancelled: true,
+            completed: false,
+            reason: "unmount",
+          });
+        } catch (e) {
+          // swallow
+        }
       }
     };
-  }, [currentPlayerId]);
+  }, [playerId]);
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -98,11 +107,13 @@ export default function MinesweeperGame() {
     Inter_700Bold,
   });
 
+  // ───────────────────────────────
   // Game state
+  // ───────────────────────────────
   const [difficulty, setDifficulty] = useState("easy");
   const [showDifficultySelect, setShowDifficultySelect] = useState(true);
   const [board, setBoard] = useState([]);
-  const [gameState, setGameState] = useState("playing"); // 'playing', 'won', 'lost'
+  const [gameState, setGameState] = useState("idle"); // 'idle' | 'playing' | 'won' | 'lost'
   const [timer, setTimer] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
   const [flagsRemaining, setFlagsRemaining] = useState(0);
@@ -110,16 +121,16 @@ export default function MinesweeperGame() {
 
   const config = DIFFICULTIES[difficulty];
 
-  // Generate mines
+  // ───────────────────────────────
+  // Helpers (keep your flood reveal behavior intact)
+  // ───────────────────────────────
   const generateMines = (rows, cols, mines, firstClickRow, firstClickCol) => {
     const minePositions = new Set();
-
     while (minePositions.size < mines) {
       const row = Math.floor(Math.random() * rows);
       const col = Math.floor(Math.random() * cols);
       const pos = `${row}-${col}`;
 
-      // Don't place mine on first click or adjacent cells
       const isFirstClick = row === firstClickRow && col === firstClickCol;
       const isAdjacent =
         Math.abs(row - firstClickRow) <= 1 &&
@@ -129,47 +140,43 @@ export default function MinesweeperGame() {
         minePositions.add(pos);
       }
     }
-
     return minePositions;
   };
 
-  // Count adjacent mines
-  const countAdjacentMines = (board, row, col) => {
+  const countAdjacentMines = (grid, row, col) => {
     let count = 0;
     for (let r = row - 1; r <= row + 1; r++) {
       for (let c = col - 1; c <= col + 1; c++) {
-        if (r >= 0 && r < board.length && c >= 0 && c < board[0].length) {
-          if (board[r][c].isMine) count++;
+        if (r >= 0 && r < grid.length && c >= 0 && c < grid[0].length) {
+          if (grid[r][c].isMine) count++;
         }
       }
     }
     return count;
   };
 
-  // Initialize board
   const initializeBoard = useCallback(
     (firstClickRow = null, firstClickCol = null) => {
       const newBoard = Array(config.rows)
         .fill(null)
-        .map((_, row) =>
+        .map(() =>
           Array(config.cols)
             .fill(null)
-            .map((_, col) => ({
+            .map(() => ({
               isMine: false,
               isRevealed: false,
               isFlagged: false,
               adjacentMines: 0,
-            })),
+            }))
         );
 
-      // Place mines if first click is provided
       if (firstClickRow !== null && firstClickCol !== null) {
         const minePositions = generateMines(
           config.rows,
           config.cols,
           config.mines,
           firstClickRow,
-          firstClickCol,
+          firstClickCol
         );
 
         minePositions.forEach((pos) => {
@@ -177,14 +184,13 @@ export default function MinesweeperGame() {
           newBoard[row][col].isMine = true;
         });
 
-        // Calculate adjacent mine counts
         for (let row = 0; row < config.rows; row++) {
           for (let col = 0; col < config.cols; col++) {
             if (!newBoard[row][col].isMine) {
               newBoard[row][col].adjacentMines = countAdjacentMines(
                 newBoard,
                 row,
-                col,
+                col
               );
             }
           }
@@ -192,87 +198,150 @@ export default function MinesweeperGame() {
       }
 
       setBoard(newBoard);
-      setGameState("playing");
+      setGameState(firstClickRow !== null ? "playing" : "idle");
       setTimer(0);
       setGameStarted(firstClickRow !== null);
       setFlagsRemaining(config.mines);
       setRevealedCells(0);
     },
-    [config],
+    [config]
   );
 
-  // Reveal cell and adjacent empty cells
-  const revealCell = (board, row, col, visited = new Set()) => {
-    const key = `${row}-${col}`;
-    if (visited.has(key)) return { newBoard: board, revealedCount: 0 };
+ // REPLACE your revealCell with this iterative BFS version (no recursion, single clone)
+const revealCell = (board, startR, startC) => {
+  const rows = config.rows;
+  const cols = config.cols;
 
+  // deep clone once
+  const newBoard = board.map((r) => r.map((c) => ({ ...c })));
+
+  // bounds helper
+  const inBounds = (r, c) => r >= 0 && r < rows && c >= 0 && c < cols;
+
+  // early exits
+  if (!inBounds(startR, startC)) {
+    return { newBoard, revealedCount: 0 };
+  }
+  const first = newBoard[startR][startC];
+  if (first.isRevealed || first.isFlagged) {
+    return { newBoard, revealedCount: 0 };
+  }
+
+  let revealedCount = 0;
+  const stack = [[startR, startC]];
+  const visited = new Set();
+
+  while (stack.length) {
+    const [r, c] = stack.pop();
+    const key = `${r}-${c}`;
+    if (visited.has(key)) continue;
+    if (!inBounds(r, c)) continue;
+
+    const cell = newBoard[r][c];
+    if (cell.isRevealed || cell.isFlagged) {
+      visited.add(key);
+      continue;
+    }
+
+    // reveal this cell
+    cell.isRevealed = true;
+    revealedCount += 1;
     visited.add(key);
 
-    if (row < 0 || row >= config.rows || col < 0 || col >= config.cols) {
-      return { newBoard: board, revealedCount: 0 };
-    }
-
-    const newBoard = board.map((r) => r.map((c) => ({ ...c })));
-    const cell = newBoard[row][col];
-
-    if (cell.isRevealed || cell.isFlagged) {
-      return { newBoard: board, revealedCount: 0 };
-    }
-
-    cell.isRevealed = true;
-    let revealedCount = 1;
-
-    // If empty cell (no adjacent mines), reveal all adjacent cells
-    if (cell.adjacentMines === 0 && !cell.isMine) {
-      for (let r = row - 1; r <= row + 1; r++) {
-        for (let c = col - 1; c <= col + 1; c++) {
-          if (r !== row || c !== col) {
-            const result = revealCell(newBoard, r, c, visited);
-            Object.assign(newBoard, result.newBoard);
-            revealedCount += result.revealedCount;
-          }
+    // if it's an empty cell (0 adjacent), push neighbors to reveal as a chunk
+    if (!cell.isMine && cell.adjacentMines === 0) {
+      for (let rr = r - 1; rr <= r + 1; rr++) {
+        for (let cc = c - 1; cc <= c + 1; cc++) {
+          if (rr === r && cc === c) continue;
+          stack.push([rr, cc]);
         }
       }
     }
+  }
 
-    return { newBoard, revealedCount };
+  return { newBoard, revealedCount };
+};
+
+  // ───────────────────────────────
+  // Timer (no periodic database playtime pushes — only UI timer)
+  // ───────────────────────────────
+  useEffect(() => {
+    let interval;
+    if (gameStarted && gameState === "playing") {
+      interval = setInterval(() => {
+        setTimer((prev) => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [gameStarted, gameState]);
+
+  // ───────────────────────────────
+  // Back / Exit handling (submit a play/loss; no best_time)
+  // ───────────────────────────────
+  const handleBackPress = () => {
+    try {
+      if (sessionId && !submittedRef.current) {
+        submittedRef.current = true;
+        // End as a "play" (not completed). No best_time.
+        gameTracker.endGame(sessionId, 0, {
+          result: "play",
+          cancelled: true,
+          completed: false,
+          time_s: timer,
+          difficulty,
+          reason: "back",
+        });
+      }
+    } catch (e) {
+      // swallow
+    }
+
+    // Reset local state so the next open is fresh
+    setTimer(0);
+    setGameStarted(false);
+    setGameState("idle");
+    setBoard([]);
+    setRevealedCells(0);
+    setFlagsRemaining(0);
+
+    router.back();
   };
 
-  // Handle cell press
+  // ───────────────────────────────
+  // Gameplay
+  // ───────────────────────────────
   const handleCellPress = (row, col, isLongPress = false) => {
-    if (gameState !== "playing") return;
+    if (gameState !== "playing" && gameState !== "idle") return;
 
-    const cell = board[row][col];
+    const cellCurrent = board[row]?.[col];
+    if (!cellCurrent) return;
 
-    // Long press or right click for flagging
+    // Long press toggles flag
     if (isLongPress) {
-      if (cell.isRevealed) return;
-
+      if (cellCurrent.isRevealed) return;
       const newBoard = board.map((r) => r.map((c) => ({ ...c })));
       newBoard[row][col].isFlagged = !newBoard[row][col].isFlagged;
-
       setBoard(newBoard);
-      setFlagsRemaining(
-        (prev) => prev + (newBoard[row][col].isFlagged ? -1 : 1),
-      );
+      setFlagsRemaining((prev) => prev + (newBoard[row][col].isFlagged ? -1 : 1));
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       return;
     }
 
-    // Can't reveal flagged cells
-    if (cell.isFlagged) return;
-
-    // First click - initialize mines
+    // First click lays mines and starts playing
     if (!gameStarted) {
       initializeBoard(row, col);
       setGameStarted(true);
       return;
     }
 
-    // Hit a mine - game over
-    if (cell.isMine) {
+    // Can't reveal flagged or already revealed
+    if (cellCurrent.isFlagged || cellCurrent.isRevealed) return;
+
+    // Hit a mine → reveal all mines, submit a "play", not completed
+    if (cellCurrent.isMine) {
       const newBoard = board.map((r) => r.map((c) => ({ ...c })));
-      // Reveal all mines
       for (let r = 0; r < config.rows; r++) {
         for (let c = 0; c < config.cols; c++) {
           if (newBoard[r][c].isMine) {
@@ -282,71 +351,76 @@ export default function MinesweeperGame() {
       }
       setBoard(newBoard);
       setGameState("lost");
-
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
 
-      Alert.alert(
-        "Game Over! 💣",
-        `You hit a mine! Time: ${Math.floor(timer / 60)}:${(timer % 60)
-          .toString()
-          .padStart(2, "0")}`,
-        [
-          { text: "New Game", onPress: () => initializeBoard() },
-          { text: "Back to Hub", onPress: () => router.back() },
-        ],
-      );
-      return;
-    }
-
-    // Reveal cell(s)
-    const result = revealCell(board, row, col);
-    setBoard(result.newBoard);
-    setRevealedCells((prev) => prev + result.revealedCount);
-
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-
-    // Check win condition
-    const totalCells = config.rows * config.cols;
-    const newRevealedCells = revealedCells + result.revealedCount;
-
-    if (newRevealedCells === totalCells - config.mines) {
-      setGameState("won");
-
-      // For time-based games like Minesweeper, submit the actual time taken as the score
-      // This allows proper leaderboard tracking of best times
-      if (gameId) {
+      // Submit as a play (loss). Do NOT submit best_time.
+      if (sessionId && !submittedRef.current) {
         try {
-          gameTracker.endGame(gameId, timer); // Pass timer (seconds) as score
+          submittedRef.current = true;
+          gameTracker.endGame(sessionId, 0, {
+            result: "play",
+            completed: false,
+            time_s: timer,
+            difficulty,
+            reason: "mine",
+          });
         } catch (e) {
-          console.warn("gameTracker.endGame failed:", e?.message || e);
+          // swallow
         }
       }
 
       Alert.alert(
-        "Victory! 🎉",
-        `You won! Time: ${Math.floor(timer / 60)}:${(timer % 60)
-          .toString()
-          .padStart(2, "0")}`,
+        "Game Over! 💣",
+        `You hit a mine! Time: ${Math.floor(timer / 60)}:${String(timer % 60).padStart(2, "0")}`,
         [
           { text: "New Game", onPress: () => initializeBoard() },
-          { text: "Back to Hub", onPress: () => router.back() },
-        ],
+          { text: "Back to Hub", onPress: handleBackPress },
+        ]
+      );
+      return;
+    }
+
+    // Reveal cell(s) with flood
+    const result = revealCell(board, row, col);
+    setBoard(result.newBoard);
+    setRevealedCells((prev) => prev + result.revealedCount);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    // Win check
+    const totalCells = config.rows * config.cols;
+    const newRevealedCount = revealedCells + result.revealedCount;
+    if (newRevealedCount === totalCells - config.mines) {
+      setGameState("won");
+
+  // Submit best_time ONLY on completion (win)
+if (sessionId && !submittedRef.current) {
+  try {
+    submittedRef.current = true;
+    // IMPORTANT: for best_time games, the backend expects the time in the SCORE param
+    gameTracker.endGame(sessionId, timer, {
+      result: "win",
+      completed: true,
+      best_time: timer, // optional
+      time_s: timer,    // optional
+      difficulty,
+    });
+  } catch (e) {
+    console.warn("endGame (win) failed:", e?.message || e);
+  }
+}
+
+      Alert.alert(
+        "Victory! 🎉",
+        `You won! Time: ${Math.floor(timer / 60)}:${String(timer % 60).padStart(2, "0")}`,
+        [
+          { text: "New Game", onPress: () => initializeBoard() },
+          { text: "Back to Hub", onPress: handleBackPress },
+        ]
       );
     }
   };
 
-  // Timer effect
-  useEffect(() => {
-    let interval;
-    if (gameStarted && gameState === "playing") {
-      interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [gameStarted, gameState]);
-
-  // Initialize board on difficulty change
+  // Reset board whenever difficulty is chosen (after selection screen)
   useEffect(() => {
     if (!showDifficultySelect) {
       initializeBoard();
@@ -357,7 +431,9 @@ export default function MinesweeperGame() {
     return null;
   }
 
+  // ───────────────────────────────
   // Difficulty selection screen
+  // ───────────────────────────────
   if (showDifficultySelect) {
     return (
       <View style={{ flex: 1 }}>
@@ -392,7 +468,7 @@ export default function MinesweeperGame() {
             }}
           >
             <TouchableOpacity
-              onPress={() => router.back()}
+              onPress={handleBackPress}
               style={{
                 padding: 8,
                 borderRadius: 12,
@@ -429,7 +505,7 @@ export default function MinesweeperGame() {
               Choose Difficulty
             </Text>
 
-            {Object.entries(DIFFICULTIES).map(([key, config]) => (
+            {Object.entries(DIFFICULTIES).map(([key, cfg]) => (
               <TouchableOpacity
                 key={key}
                 onPress={() => {
@@ -463,7 +539,7 @@ export default function MinesweeperGame() {
                       marginBottom: 4,
                     }}
                   >
-                    {config.name}
+                    {cfg.name}
                   </Text>
                   <Text
                     style={{
@@ -472,7 +548,7 @@ export default function MinesweeperGame() {
                       color: colors.textSecondary,
                     }}
                   >
-                    {config.rows}×{config.cols} grid • {config.mines} mines
+                    {cfg.rows}×{cfg.cols} grid • {cfg.mines} mines
                   </Text>
                 </BlurView>
               </TouchableOpacity>
@@ -483,6 +559,9 @@ export default function MinesweeperGame() {
     );
   }
 
+  // ───────────────────────────────
+  // Game screen
+  // ───────────────────────────────
   const cellSize = Math.min(25, (screenWidth - 40) / config.cols);
   const boardWidth = cellSize * config.cols;
   const boardHeight = cellSize * config.rows;
@@ -511,7 +590,7 @@ export default function MinesweeperGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => setShowDifficultySelect(true)}
+            onPress={handleBackPress}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -590,8 +669,7 @@ export default function MinesweeperGame() {
                     color: colors.gameAccent8,
                   }}
                 >
-                  {Math.floor(timer / 60)}:
-                  {(timer % 60).toString().padStart(2, "0")}
+                  {Math.floor(timer / 60)}:{String(timer % 60).padStart(2, "0")}
                 </Text>
               </View>
 
@@ -679,9 +757,7 @@ export default function MinesweeperGame() {
                   <TouchableOpacity
                     key={`${rowIndex}-${colIndex}`}
                     onPress={() => handleCellPress(rowIndex, colIndex)}
-                    onLongPress={() =>
-                      handleCellPress(rowIndex, colIndex, true)
-                    }
+                    onLongPress={() => handleCellPress(rowIndex, colIndex, true)}
                     style={{
                       width: cellSize,
                       height: cellSize,

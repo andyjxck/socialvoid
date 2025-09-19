@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { View, Text, TouchableOpacity, Dimensions } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { ArrowLeft, RotateCcw, Undo } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -12,11 +13,9 @@ import { useTheme } from "../../../utils/theme";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+
 /* =========================================================================
-   FULL-COVER GENERATOR (embedded)
-   - Builds a Hamiltonian "snake" path that visits every cell once
-   - Splits into segments → endpoints are segment ends
-   - Guarantees the final solution covers 100% of the board
+   FULL-COVER GENERATOR (embedded) — unchanged logic
    ========================================================================= */
 
 const COLORS = [
@@ -34,7 +33,7 @@ const COLORS = [
   "#FDCB6E",
 ];
 
-// tiny seeded RNG (for reproducible-but-random feel)
+// tiny seeded RNG
 function xmur3(str) {
   let h = 1779033703 ^ str.length;
   for (let i = 0; i < str.length; i++) {
@@ -57,8 +56,6 @@ function mulberry32(a) {
   };
 }
 const seeded = (seed) => mulberry32(xmur3(seed)());
-const randInt = (rng, min, max) => min + Math.floor(rng() * (max - min + 1));
-
 const shuffle = (rng, arr) => {
   const a = arr.slice();
   for (let i = a.length - 1; i > 0; i--) {
@@ -67,8 +64,6 @@ const shuffle = (rng, arr) => {
   }
   return a;
 };
-
-// Build a single Hamiltonian snake path across n×n grid
 const buildSnakePath = (n) => {
   const path = [];
   for (let r = 0; r < n; r++) {
@@ -78,26 +73,18 @@ const buildSnakePath = (n) => {
       for (let c = n - 1; c >= 0; c--) path.push({ row: r, col: c });
     }
   }
-  return path; // length n*n
+  return path;
 };
-
-// Randomly flip rows or reverse whole snake to add variety → still full cover
 const spiceSnake = (rng, snake, n) => {
   let s = snake.slice();
   if (rng() < 0.5) s.reverse();
-  // Occasionally rotate the board 90° by mapping coords
-  if (rng() < 0.5) {
-    s = s.map((p) => ({ row: p.col, col: n - 1 - p.row }));
-  }
+  if (rng() < 0.5) s = s.map((p) => ({ row: p.col, col: n - 1 - p.row }));
   return s;
 };
-
-// Split an array length L into K contiguous segment lengths (>= minLen) summing to L
 const splitIntoSegments = (rng, total, K, minLen) => {
   const base = Array(K).fill(minLen);
   let remaining = total - K * minLen;
   if (remaining < 0) return null;
-
   while (remaining > 0) {
     for (let i = 0; i < K && remaining > 0; i++) {
       const add = Math.min(1 + Math.floor(rng() * 3), remaining);
@@ -105,63 +92,39 @@ const splitIntoSegments = (rng, total, K, minLen) => {
       remaining -= add;
     }
   }
-  return shuffle(rng, base); // randomize segment order a bit
+  return shuffle(rng, base);
 };
-
-// Choose number of color pairs based on level + grid size (kept sensible)
 const chooseNumPairs = (n, level) => {
   const minPairs = Math.max(3, Math.floor(n / 2));
   const maxPairs = Math.min(8, Math.floor((n * n) / 3));
   const scaled = minPairs + Math.floor(Math.min(level, n * 2) / 2);
   return Math.max(minPairs, Math.min(maxPairs, scaled));
 };
-
-// Full-cover generator: ALWAYS fills board by cutting the snake into segments
 const generateFullCoverFlow = (gridSize = 5, level = 1) => {
   const n = gridSize;
   const salt = Math.floor(Math.random() * 1e9);
   const rng = seeded(`flow-fullcover|n=${n}|level=${level}|salt=${salt}`);
-
-  // 1) base snake
   const base = buildSnakePath(n);
-  const snake = spiceSnake(rng, base, n); // variety, still Hamiltonian
-
-  // 2) number of pairs
+  const snake = spiceSnake(rng, base, n);
   const pairs = chooseNumPairs(n, level);
-
-  // 3) segment lengths
-  const minLen = Math.max(3, Math.floor(n * 0.7)); // avoid trivial tiny segments
+  const minLen = Math.max(3, Math.floor(n * 0.7));
   const lens =
     splitIntoSegments(rng, n * n, pairs, minLen) ||
     Array(pairs).fill(Math.floor((n * n) / pairs));
-  // if split failed (edge cases), just chunk evenly
-
-  // 4) cut snake into segments → endpoints
   let idx = 0;
   const endpoints = {};
   const colors = shuffle(rng, COLORS).slice(0, pairs);
-
   for (let i = 0; i < pairs; i++) {
     const len = lens[i];
     const segment = snake.slice(idx, idx + len);
     idx += len;
-    // safety: if lengths overrun due to fallback, clamp
-    if (segment.length === 0) continue;
-
+    if (!segment.length) continue;
     const start = segment[0];
     const end = segment[segment.length - 1];
     const color = colors[i];
     endpoints[color] = [start, end];
   }
-
-  // For debug:
-  console.log(
-    `🧩 Flow FULL-COVER OK n=${n} level=${level} pairs=${
-      Object.keys(endpoints).length
-    } salt=${salt}`
-  );
-
-  return { endpoints }; // we only expose endpoints; player must fill to cover 100%
+  return { endpoints };
 };
 
 /* =========================================================================
@@ -169,6 +132,7 @@ const generateFullCoverFlow = (gridSize = 5, level = 1) => {
    ========================================================================= */
 
 const { width: screenWidth } = Dimensions.get("window");
+const LEVEL_KEY = "flow_connect_level";
 
 export default function FlowConnectGame() {
   const insets = useSafeAreaInsets();
@@ -179,6 +143,7 @@ export default function FlowConnectGame() {
     (lvl) => Math.min(7, 5 + Math.floor((lvl - 1) / 3)),
     []
   );
+
   const [gridSize, setGridSize] = useState(gridSizeForLevel(1));
   const CELL_SIZE = (screenWidth - 80) / gridSize;
 
@@ -192,13 +157,14 @@ export default function FlowConnectGame() {
   const [currentPath, setCurrentPath] = useState(null);
   const [gameWon, setGameWon] = useState(false);
 
+  // guard so we only submit once
+  const submittedRef = useRef(false);
+
   // Load player ID
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
+        const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
         setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId, 10) : 1);
       } catch {
         setCurrentPlayerId(1);
@@ -207,109 +173,81 @@ export default function FlowConnectGame() {
     loadPlayerId();
   }, []);
 
-  // Setup game tracking
+  // Load saved level, then init board for that level
   useEffect(() => {
     let mounted = true;
-    let currentGameId = null;
-
-    const setupGame = async () => {
-      if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.FLOW_CONNECT);
-      if (id && mounted) {
-        currentGameId = id;
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
+    (async () => {
+      try {
+        const savedLvl = await AsyncStorage.getItem(LEVEL_KEY);
+        const startLevel = Math.max(1, parseInt(savedLvl || "1", 10) || 1);
+        if (!mounted) return;
+        initializeGame(startLevel); // also sets level/grid
+      } catch {
+        initializeGame(1);
       }
-    };
-    setupGame();
+    })();
+    return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    return () => {
-      mounted = false;
-      if (currentGameId) gameTracker.endGame(currentGameId, 0);
-    };
-  }, [currentPlayerId]);
+  // Save level when it changes
+  useEffect(() => {
+    AsyncStorage.setItem(LEVEL_KEY, String(level)).catch(() => {});
+  }, [level]);
+
+  // Start/cancel session on focus/blur
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+
+      const start = async () => {
+        if (!currentPlayerId) return;
+        try {
+          const id = await getGameId(GAME_TYPES.FLOW_CONNECT);
+          if (!active) return;
+          setGameId(id);
+          submittedRef.current = false;
+          await gameTracker.startGame(id, currentPlayerId);
+        } catch (e) {
+          console.warn("startGame failed:", e);
+        }
+      };
+
+      start();
+
+      // On blur/unmount: cancel if not submitted
+      return () => {
+        active = false;
+        if (gameId && !submittedRef.current) {
+          try {
+            gameTracker.endGame(gameId, 0, { cancelled: true, reason: "blur" });
+          } catch {}
+        }
+      };
+    }, [currentPlayerId, gameId])
+  );
 
   const initializeGame = useCallback(
-    (levelToLoad = level) => {
-      const gs = gridSizeForLevel(levelToLoad);
+    (levelToLoad) => {
+      const lv = levelToLoad ?? level;
+      const gs = gridSizeForLevel(lv);
+      setLevel(lv);
       setGridSize(gs);
 
-      // FULL COVER, always
-      const { endpoints: eps } = generateFullCoverFlow(gs, levelToLoad);
-
+      const { endpoints: eps } = generateFullCoverFlow(gs, lv);
       setEndpoints(eps);
       setPaths({});
       setCurrentPath(null);
       setGameWon(false);
       setMoves(0);
-      setLevel(levelToLoad);
+      submittedRef.current = false;
 
       console.log(
-        `🎯 Flow INIT FULL-COVER n=${gs} level=${levelToLoad} pairs=${
-          Object.keys(eps).length
-        }`
+        `🎯 Flow INIT FULL-COVER n=${gs} level=${lv} pairs=${Object.keys(eps).length}`
       );
     },
     [gridSizeForLevel, level]
   );
-
-  // Win condition: every color path must be contiguous and, combined, they must fill the board (implicit with full-cover endpoints).
-  useEffect(() => {
-    const checkWin = () => {
-      const required = Object.keys(endpoints).length;
-      if (!required) return false;
-
-      const seen = new Set();
-      const isAdj = (a, b) => {
-        const dr = Math.abs(a.row - b.row),
-          dc = Math.abs(a.col - b.col);
-        return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
-      };
-
-      for (const [color, eps] of Object.entries(endpoints)) {
-        const p = paths[color];
-        if (!p || p.length < 2) return false;
-
-        const hasA = p.some(
-          (c) => c.row === eps[0].row && c.col === eps[0].col
-        );
-        const hasB = p.some(
-          (c) => c.row === eps[1].row && c.col === eps[1].col
-        );
-        if (!hasA || !hasB) return false;
-
-        for (let i = 1; i < p.length; i++)
-          if (!isAdj(p[i - 1], p[i])) return false;
-
-        for (const cell of p) {
-          const kk = `${cell.row},${cell.col}`;
-          if (seen.has(kk)) return false;
-          seen.add(kk);
-        }
-      }
-
-      // To truly ensure full cover on user solution, require seen.size === n*n:
-      // Users can connect endpoints with a shorter path than our segment, but since
-      // we don't reveal solution cells, require full fill to accept win.
-      return seen.size === gridSize * gridSize;
-    };
-
-    if (checkWin()) {
-      setGameWon(true);
-      if (gameId) {
-        const score = Math.max(
-          100,
-          1000 - moves * 10 + level * 100 + gridSize * 50
-        );
-        gameTracker.endGame(gameId, score);
-      }
-    }
-  }, [paths, endpoints, moves, level, gameId, gridSize]);
-
-  // mount
-  useEffect(() => {
-    initializeGame(1);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getCellContent = (row, col) => {
     for (const [color, eps] of Object.entries(endpoints)) {
@@ -322,10 +260,7 @@ export default function FlowConnectGame() {
         return { type: "path", color };
       }
     }
-    if (
-      currentPath &&
-      currentPath.path.some((p) => p.row === row && p.col === col)
-    ) {
+    if (currentPath && currentPath.path.some((p) => p.row === row && p.col === col)) {
       return { type: "path", color: currentPath.color };
     }
     return null;
@@ -333,8 +268,7 @@ export default function FlowConnectGame() {
 
   const areAdjacent = (a, b) => {
     if (!a || !b) return false;
-    const dr = Math.abs(a.row - b.row),
-      dc = Math.abs(a.col - b.col);
+    const dr = Math.abs(a.row - b.row), dc = Math.abs(a.col - b.col);
     return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
   };
 
@@ -352,14 +286,9 @@ export default function FlowConnectGame() {
       const last = currentPath.path[currentPath.path.length - 1];
       if (!areAdjacent(last, cell)) return;
 
-      const idx = currentPath.path.findIndex(
-        (p) => p.row === row && p.col === col
-      );
+      const idx = currentPath.path.findIndex((p) => p.row === row && p.col === col);
       if (idx !== -1) {
-        setCurrentPath((prev) => ({
-          ...prev,
-          path: prev.path.slice(0, idx + 1),
-        }));
+        setCurrentPath((prev) => ({ ...prev, path: prev.path.slice(0, idx + 1) }));
         return;
       }
 
@@ -421,7 +350,7 @@ export default function FlowConnectGame() {
     setCurrentPath(null);
     setMoves(0);
     setGameWon(false);
-    initializeGame(level); // generate a fresh full-cover layout for same level
+    initializeGame(level);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   };
 
@@ -435,6 +364,49 @@ export default function FlowConnectGame() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
   };
 
+  // Win condition checker + submit exactly once
+  useEffect(() => {
+    const checkWin = () => {
+      const required = Object.keys(endpoints).length;
+      if (!required) return false;
+
+      const seen = new Set();
+      const isAdj = (a, b) => {
+        const dr = Math.abs(a.row - b.row), dc = Math.abs(a.col - b.col);
+        return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
+      };
+
+      for (const [color, eps] of Object.entries(endpoints)) {
+        const p = paths[color];
+        if (!p || p.length < 2) return false;
+
+        const hasA = p.some((c) => c.row === eps[0].row && c.col === eps[0].col);
+        const hasB = p.some((c) => c.row === eps[1].row && c.col === eps[1].col);
+        if (!hasA || !hasB) return false;
+
+        for (let i = 1; i < p.length; i++)
+          if (!isAdj(p[i - 1], p[i])) return false;
+
+        for (const cell of p) {
+          const kk = `${cell.row},${cell.col}`;
+          if (seen.has(kk)) return false;
+          seen.add(kk);
+        }
+      }
+
+      return seen.size === gridSize * gridSize;
+    };
+
+    if (checkWin()) {
+      if (!gameWon) setGameWon(true);
+      if (gameId && !submittedRef.current) {
+        submittedRef.current = true;
+        const score = Math.max(100, 1000 - moves * 10 + level * 100 + gridSize * 50);
+        gameTracker.endGame(gameId, score, { level, gridSize, moves, result: "win" });
+      }
+    }
+  }, [paths, endpoints, moves, level, gameId, gridSize, gameWon]);
+
   /* ============================== UI ============================== */
 
   const BOARD_SIDE = gridSize * CELL_SIZE;
@@ -443,6 +415,7 @@ export default function FlowConnectGame() {
     <View style={{ flex: 1 }}>
       <StatusBar style={isDark ? "light" : "dark"} />
       <NightSkyBackground />
+
       {/* Header */}
       <View
         style={{
@@ -460,7 +433,15 @@ export default function FlowConnectGame() {
           }}
         >
           <TouchableOpacity
-            onPress={() => router.back()}
+            onPress={() => {
+              // Back should end the session but NOT submit unless completed
+              if (gameId && !submittedRef.current) {
+                try {
+                  gameTracker.endGame(gameId, 0, { cancelled: true, reason: "back" });
+                } catch {}
+              }
+              router.back();
+            }}
             style={{
               padding: 8,
               borderRadius: 12,
@@ -470,9 +451,7 @@ export default function FlowConnectGame() {
             <ArrowLeft size={24} color={colors.text} />
           </TouchableOpacity>
 
-          <Text
-            style={{ fontSize: 20, fontWeight: "bold", color: colors.text }}
-          >
+          <Text style={{ fontSize: 20, fontWeight: "bold", color: colors.text }}>
             Flow Connect
           </Text>
 
@@ -618,9 +597,7 @@ export default function FlowConnectGame() {
       </View>
 
       {/* Game Board */}
-      <View
-        style={{ flex: 1, justifyContent: "center", paddingHorizontal: 20 }}
-      >
+      <View style={{ flex: 1, justifyContent: "center", paddingHorizontal: 20 }}>
         <View
           style={{
             width: gridSize * CELL_SIZE,
@@ -641,10 +618,8 @@ export default function FlowConnectGame() {
                 const isCurrentTip =
                   currentPath &&
                   currentPath.path.length > 0 &&
-                  currentPath.path[currentPath.path.length - 1]?.row ===
-                    rowIndex &&
-                  currentPath.path[currentPath.path.length - 1]?.col ===
-                    colIndex;
+                  currentPath.path[currentPath.path.length - 1]?.row === rowIndex &&
+                  currentPath.path[currentPath.path.length - 1]?.col === colIndex;
 
                 return (
                   <TouchableOpacity
@@ -664,9 +639,7 @@ export default function FlowConnectGame() {
                       alignItems: "center",
                       margin: 2,
                       borderRadius:
-                        content && content.type === "endpoint"
-                          ? CELL_SIZE / 2
-                          : 6,
+                        content && content.type === "endpoint" ? CELL_SIZE / 2 : 6,
                       borderWidth: isCurrentTip ? 3 : 0,
                       borderColor: currentPath?.color || "transparent",
                     }}

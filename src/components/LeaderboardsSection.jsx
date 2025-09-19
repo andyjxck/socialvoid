@@ -2,15 +2,7 @@ import React, { useState } from "react";
 import { View, Text, ScrollView, TouchableOpacity } from "react-native";
 import { useTheme } from "../utils/theme";
 import { BlurView } from "expo-blur";
-import {
-  Trophy,
-  Users,
-  Globe,
-  Crown,
-  Medal,
-  Award,
-  Clock,
-} from "lucide-react-native";
+import { Trophy, Users, Globe, Crown, Medal, Award, Clock } from "lucide-react-native";
 import { useQuery } from "@tanstack/react-query";
 import * as Haptics from "expo-haptics";
 import {
@@ -25,9 +17,9 @@ import { supabase } from "../utils/supabase";
 export default function LeaderboardsSection({ playerId }) {
   const { colors, isDark } = useTheme();
 
-  const [selectedGame, setSelectedGame] = useState("overall");
-  const [leaderboardType, setLeaderboardType] = useState("global");
-  const [scoreType, setScoreType] = useState("playtime");
+  const [selectedGame, setSelectedGame] = useState("overall"); // "overall" or gameId (string)
+  const [leaderboardType, setLeaderboardType] = useState("global"); // "global" | "friends"
+  const [scoreType, setScoreType] = useState("playtime"); // "playtime" | "scores"
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -36,195 +28,300 @@ export default function LeaderboardsSection({ playerId }) {
     Inter_700Bold,
   });
 
-  // 🎮 Fetch games
+  const pid = Number(playerId) || 0;
+
+  // ---- Helpers to decide what to show for each game
+  const AI_TYPES = new Set(["chess", "connect_4", "dots_and_boxes", "mancala"]);
+  const BEST_TIME_TYPES = new Set(["sudoku"]); // add more if you time them (e.g. word_search)
+
+  const decideDisplayMode = (gameRow) => {
+    if (!gameRow) return "HIGH_SCORE";
+    // If your table has this boolean, prefer it.
+    if (typeof gameRow.track_best_time === "boolean") {
+      return gameRow.track_best_time ? "BEST_TIME" : "HIGH_SCORE";
+    }
+    // Fall back to game_type heuristics
+    if (AI_TYPES.has(gameRow.game_type)) return "AI_WINS";
+    if (BEST_TIME_TYPES.has(gameRow.game_type)) return "BEST_TIME";
+    return "HIGH_SCORE";
+  };
+
+  // 1) Games
   const { data: games = [] } = useQuery({
     queryKey: ["games"],
     queryFn: async () => {
-      const { data, error } = await supabase.rpc(
-        "exec_sql",
-        {
-          sql: `SELECT id, name, game_type FROM games ORDER BY id ASC;`,
-        }
-      );
-      if (error) throw error;
-      return data;
-    },
-    refetchInterval: 60000,
-  });
-
-  // 👥 Fetch friends
-  const { data: friends = [] } = useQuery({
-    queryKey: ["friends", playerId],
-    queryFn: async () => {
-      if (!playerId || leaderboardType !== "friends") return [];
-      const { data, error } = await supabase.rpc(
-        "exec_sql",
-        {
-          sql: `
-            SELECT f.friend_id AS id
-            FROM friends f
-            WHERE f.player_id = ${playerId};
-          `,
-        }
-      );
-      if (error) throw error;
+      const { data, error } = await supabase
+        .from("games")
+        .select("id, name, game_type, track_best_time") // track_best_time is optional; ok if null/absent
+        .order("id", { ascending: true });
+      if (error) {
+        console.warn("games error:", error);
+        return [];
+      }
       return data || [];
     },
-    enabled: !!playerId && leaderboardType === "friends",
-    refetchInterval: 60000,
+    staleTime: 60_000,
   });
 
-  // 🏆 Fetch leaderboard
+  const selectedGameRow =
+    selectedGame === "overall"
+      ? null
+      : games.find((g) => String(g.id) === String(selectedGame)) || null;
+
+  const displayMode = selectedGame === "overall" ? null : decideDisplayMode(selectedGameRow);
+
+  // 2) Friends (ids) from friendships (accepted, either side)
+  const { data: friends = [] } = useQuery({
+    queryKey: ["friends-ids", pid, leaderboardType],
+    enabled: !!pid && leaderboardType === "friends",
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("friendships")
+        .select("player1_id, player2_id, status")
+        .or(`player1_id.eq.${pid},player2_id.eq.${pid}`)
+        .eq("status", "accepted");
+      if (error) {
+        console.warn("friends error:", error);
+        return [];
+      }
+      const ids = (data || []).map((f) =>
+        f.player1_id === pid ? f.player2_id : f.player1_id
+      );
+      return ids.map(Number).filter((n) => Number.isFinite(n));
+    },
+    staleTime: 60_000,
+  });
+
+  // 3) Leaderboard (per overall/per-game + correct stat/ordering)
   const { data: leaderboard = [], isLoading } = useQuery({
     queryKey: [
       "leaderboard",
       selectedGame,
       leaderboardType,
       scoreType,
-      playerId,
-      friends.length,
+      pid,
+      friends.join(","),
+      displayMode,
     ],
+    enabled: !!pid,
     queryFn: async () => {
-      let sql;
-
+      // OVERALL (players)
       if (selectedGame === "overall") {
         if (scoreType === "playtime") {
-          sql = `
-            SELECT p.id as player_id, p.username, p.profile_emoji,
-                   p.total_playtime_seconds,
-                   RANK() OVER (ORDER BY p.total_playtime_seconds DESC) as rank_position
-            FROM players p
-            LIMIT 50;
-          `;
+          const { data, error } = await supabase
+            .from("players")
+            .select("id, username, profile_emoji, total_playtime_seconds")
+            .order("total_playtime_seconds", { ascending: false, nullsFirst: false })
+            .limit(50);
+          if (error) {
+            console.warn("overall playtime error:", error);
+            return [];
+          }
+          return (data || []).map((row, idx) => ({
+            player_id: row.id,
+            username: row.username,
+            profile_emoji: row.profile_emoji,
+            total_playtime_seconds: row.total_playtime_seconds || 0,
+            rank_position: idx + 1,
+          }));
         } else {
-          sql = `
-            SELECT p.id as player_id, p.username, p.profile_emoji,
-                   p.total_points,
-                   RANK() OVER (ORDER BY p.total_points DESC) as rank_position
-            FROM players p
-            LIMIT 50;
-          `;
+          const { data, error } = await supabase
+            .from("players")
+            .select("id, username, profile_emoji, total_points")
+            .order("total_points", { ascending: false, nullsFirst: false })
+            .limit(50);
+          if (error) {
+            console.warn("overall scores error:", error);
+            return [];
+          }
+          return (data || []).map((row, idx) => ({
+            player_id: row.id,
+            username: row.username,
+            profile_emoji: row.profile_emoji,
+            total_points: row.total_points || 0,
+            rank_position: idx + 1,
+          }));
         }
+      }
+
+      // PER-GAME (player_game_stats)
+      const gameId = Number(selectedGame);
+      if (!Number.isFinite(gameId)) return [];
+
+      if (scoreType === "playtime") {
+        // Per-game PLAYTIME (if you have this column)
+        const { data: stats, error: sErr } = await supabase
+          .from("player_game_stats")
+          .select("player_id, total_playtime_seconds")
+          .eq("game_id", gameId)
+          .order("total_playtime_seconds", { ascending: false, nullsFirst: false })
+          .limit(50);
+        if (sErr) {
+          console.warn("game playtime error:", sErr);
+          return [];
+        }
+        const ids = Array.from(new Set((stats || []).map((s) => s.player_id)));
+        let profiles = [];
+        if (ids.length > 0) {
+          const { data: players, error: pErr } = await supabase
+            .from("players")
+            .select("id, username, profile_emoji")
+            .in("id", ids);
+          if (!pErr) profiles = players || [];
+          else console.warn("players hydrate error:", pErr);
+        }
+        const byId = new Map(profiles.map((p) => [p.id, p]));
+        return (stats || []).map((s, idx) => ({
+          player_id: s.player_id,
+          username: byId.get(s.player_id)?.username ?? `Player ${s.player_id}`,
+          profile_emoji: byId.get(s.player_id)?.profile_emoji ?? "🧩",
+          total_playtime_seconds: s.total_playtime_seconds || 0,
+          rank_position: idx + 1,
+        }));
       } else {
-        if (scoreType === "playtime") {
-          sql = `
-            SELECT s.player_id, pl.username, pl.profile_emoji,
-                   s.total_playtime_seconds,
-                   RANK() OVER (ORDER BY s.total_playtime_seconds DESC) as rank_position
-            FROM player_game_stats s
-            JOIN players pl ON pl.id = s.player_id
-            WHERE s.game_id = ${selectedGame}
-            LIMIT 50;
-          `;
+        // Per-game SCORES
+        if (displayMode === "BEST_TIME") {
+          const { data: stats, error: sErr } = await supabase
+            .from("player_game_stats")
+            .select("player_id, best_time, total_plays")
+            .eq("game_id", gameId)
+            .order("best_time", { ascending: true, nullsFirst: false }) // lower is better
+            .limit(50);
+          if (sErr) {
+            console.warn("game scores (best_time) error:", sErr);
+            return [];
+          }
+          const ids = Array.from(new Set((stats || []).map((s) => s.player_id)));
+          let profiles = [];
+          if (ids.length > 0) {
+            const { data: players, error: pErr } = await supabase
+              .from("players")
+              .select("id, username, profile_emoji")
+              .in("id", ids);
+            if (!pErr) profiles = players || [];
+            else console.warn("players hydrate error:", pErr);
+          }
+          const byId = new Map(profiles.map((p) => [p.id, p]));
+          return (stats || []).map((s, idx) => ({
+            player_id: s.player_id,
+            username: byId.get(s.player_id)?.username ?? `Player ${s.player_id}`,
+            profile_emoji: byId.get(s.player_id)?.profile_emoji ?? "🧩",
+            best_time: s.best_time,
+            total_plays: s.total_plays,
+            rank_position: idx + 1,
+          }));
         } else {
-          sql = `
-            SELECT s.player_id, pl.username, pl.profile_emoji,
-                   s.high_score, s.best_time, s.total_plays,
-                   RANK() OVER (ORDER BY s.high_score DESC NULLS LAST) as rank_position
-            FROM player_game_stats s
-            JOIN players pl ON pl.id = s.player_id
-            WHERE s.game_id = ${selectedGame}
-            LIMIT 50;
-          `;
+          // HIGH_SCORE or AI_WINS both use high_score for ordering (desc)
+          const { data: stats, error: sErr } = await supabase
+            .from("player_game_stats")
+            .select("player_id, high_score, total_plays")
+            .eq("game_id", gameId)
+            .order("high_score", { ascending: false, nullsFirst: false })
+            .limit(50);
+          if (sErr) {
+            console.warn("game scores (high_score) error:", sErr);
+            return [];
+          }
+          const ids = Array.from(new Set((stats || []).map((s) => s.player_id)));
+          let profiles = [];
+          if (ids.length > 0) {
+            const { data: players, error: pErr } = await supabase
+              .from("players")
+              .select("id, username, profile_emoji")
+              .in("id", ids);
+            if (!pErr) profiles = players || [];
+            else console.warn("players hydrate error:", pErr);
+          }
+          const byId = new Map(profiles.map((p) => [p.id, p]));
+          return (stats || []).map((s, idx) => ({
+            player_id: s.player_id,
+            username: byId.get(s.player_id)?.username ?? `Player ${s.player_id}`,
+            profile_emoji: byId.get(s.player_id)?.profile_emoji ?? "🧩",
+            high_score: s.high_score,
+            total_plays: s.total_plays,
+            rank_position: idx + 1,
+          }));
         }
       }
-
-      const { data, error } = await supabase.rpc("exec_sql", { sql });
-      if (error) throw error;
-
-      // 👥 Friends filter
-      if (leaderboardType === "friends") {
-        const friendIds = friends.map((f) => f.id);
-        return data.filter(
-          (entry) => entry.player_id === playerId || friendIds.includes(entry.player_id)
-        );
-      }
-
-      return data || [];
     },
-    enabled: !!playerId,
-    refetchInterval: 60000,
+    // Filter to friends view (after query)
+    select: (rows) => {
+      if (leaderboardType !== "friends") return rows;
+      const set = new Set(friends);
+      return rows.filter(
+        (e) => Number(e.player_id) === pid || set.has(Number(e.player_id))
+      );
+    },
+    staleTime: 60_000,
   });
 
-  // ✅ Score helpers
-  const getScoreForSorting = (entry) => {
-    if (selectedGame === "overall") return entry.total_points || 0;
-    const gameType = games.find((g) => g.id.toString() === selectedGame)?.game_type || "";
-    if (["word_search", "kakuro", "sliding_puzzle", "sudoku", "minesweeper", "memory_match", "solitaire"].includes(gameType)) {
-      return entry.best_time ? -entry.best_time : -999999;
-    }
-    return entry.high_score || 0;
+  // ---- UI helpers
+  const formatTime = (secs) => {
+    if (!Number.isFinite(secs) || secs <= 0) return "—";
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
   };
 
   const formatScore = (entry) => {
+    // Overall
     if (selectedGame === "overall") {
       if (scoreType === "playtime") {
-        const totalSeconds = entry.total_playtime_seconds || 0;
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        const s = entry.total_playtime_seconds || 0;
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        return h > 0 ? `${h}h ${m}m` : `${m}m`;
       }
       return (entry.total_points || 0).toLocaleString();
     }
 
-    const gameType = games.find((g) => g.id.toString() === selectedGame)?.game_type || "";
-
+    // Per-game
     if (scoreType === "playtime") {
-      const totalSeconds = entry.total_playtime_seconds || 0;
-      const hours = Math.floor(totalSeconds / 3600);
-      const minutes = Math.floor((totalSeconds % 3600) / 60);
-      return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      const s = entry.total_playtime_seconds || 0;
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
     }
 
-    if (["word_search","kakuro","sliding_puzzle","sudoku","minesweeper","memory_match","solitaire"].includes(gameType)) {
-      if (entry.best_time) {
-        const minutes = Math.floor(entry.best_time / 60);
-        const seconds = entry.best_time % 60;
-        return minutes > 0 ? `${minutes}:${seconds.toString().padStart(2, "0")}` : `${seconds}s`;
-      }
-      return "--";
+    // Scores (per-game) — use displayMode
+    if (displayMode === "BEST_TIME") {
+      return formatTime(entry.best_time);
     }
-
-    if (["connect_4","mancala","chess","dots_and_boxes"].includes(gameType)) {
-      return `${entry.high_score || 0}/${entry.total_plays || 0} wins`;
+    if (displayMode === "AI_WINS") {
+      const wins = Number(entry.high_score || 0);
+      const plays = Number(entry.total_plays || 0);
+      return `${wins}/${plays} wins`;
     }
-
-    if (["flow_connect","water_sort"].includes(gameType)) {
-      return `Level ${entry.high_score || 0}`;
-    }
-
-    if (gameType === "word_wheel") {
-      return `${entry.high_score || 0} words`;
-    }
-
+    // HIGH_SCORE
     return (entry.high_score || 0).toLocaleString();
   };
 
-  // 🖐 UI Handlers
+  const getRankIcon = (position) =>
+    position === 1 ? Crown : position === 2 ? Medal : position === 3 ? Award : Trophy;
+  const getRankColor = (position) =>
+    position === 1 ? "#FFD700" : position === 2 ? "#C0C0C0" : position === 3 ? "#CD7F32" : colors.textSecondary;
+  const getSelectedGameName = () =>
+    selectedGame === "overall"
+      ? "Overall"
+      : games.find((g) => String(g.id) === String(selectedGame))?.name || "Unknown Game";
+  const getCurrentPlayerRank = () =>
+    leaderboard.find((e) => Number(e.player_id) === pid)?.rank_position || null;
+
   const handleGameSelect = (gameId) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setSelectedGame(gameId);
   };
-
   const handleTypeToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setLeaderboardType(leaderboardType === "global" ? "friends" : "global");
+    setLeaderboardType((t) => (t === "global" ? "friends" : "global"));
   };
-
   const handleScoreTypeToggle = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setScoreType(scoreType === "playtime" ? "scores" : "playtime");
+    setScoreType((t) => (t === "playtime" ? "scores" : "playtime"));
   };
-
-  // 🎖️ UI Helpers
-  const getRankIcon = (position) => position === 1 ? Crown : position === 2 ? Medal : position === 3 ? Award : Trophy;
-  const getRankColor = (position) => position === 1 ? "#FFD700" : position === 2 ? "#C0C0C0" : position === 3 ? "#CD7F32" : colors.textSecondary;
-  const getSelectedGameName = () => selectedGame === "overall" ? "Overall" : games.find((g) => g.id.toString() === selectedGame)?.name || "Unknown Game";
-  const getCurrentPlayerRank = () => leaderboard.find((e) => e.player_id === playerId)?.rank_position || null;
 
   if (!fontsLoaded) return null;
 
-  
   return (
     <View style={{ flex: 1, paddingHorizontal: 16, paddingTop: 16 }}>
       {/* Header Controls */}
@@ -233,9 +330,7 @@ export default function LeaderboardsSection({ playerId }) {
           intensity={isDark ? 40 : 60}
           tint={isDark ? "dark" : "light"}
           style={{
-            backgroundColor: isDark
-              ? "rgba(31, 41, 55, 0.6)"
-              : "rgba(255, 255, 255, 0.6)",
+            backgroundColor: isDark ? "rgba(31, 41, 55, 0.6)" : "rgba(255, 255, 255, 0.6)",
             borderRadius: 12,
             padding: 16,
             borderWidth: 1,
@@ -271,13 +366,11 @@ export default function LeaderboardsSection({ playerId }) {
                   fontFamily: "Inter_600SemiBold",
                 }}
               >
-                {leaderboardType === "global"
-                  ? "Global"
-                  : `Friends (${friends.length})`}
+                {leaderboardType === "global" ? "Global" : `Friends (${friends.length})`}
               </Text>
             </TouchableOpacity>
 
-            {/* NEW - Score Type Toggle */}
+            {/* Score Type Toggle */}
             <TouchableOpacity
               onPress={handleScoreTypeToggle}
               style={{
@@ -323,11 +416,7 @@ export default function LeaderboardsSection({ playerId }) {
             Game: {getSelectedGameName()}
           </Text>
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={{ marginBottom: 12 }}
-          >
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
             <View style={{ flexDirection: "row", gap: 6 }}>
               <TouchableOpacity
                 onPress={() => handleGameSelect("overall")}
@@ -336,9 +425,7 @@ export default function LeaderboardsSection({ playerId }) {
                   paddingVertical: 6,
                   borderRadius: 16,
                   backgroundColor:
-                    selectedGame === "overall"
-                      ? colors.gameAccent2 + "20"
-                      : colors.glassSecondary,
+                    selectedGame === "overall" ? colors.gameAccent2 + "20" : colors.glassSecondary,
                   borderWidth: selectedGame === "overall" ? 1 : 0,
                   borderColor: colors.gameAccent2,
                 }}
@@ -347,14 +434,9 @@ export default function LeaderboardsSection({ playerId }) {
                   style={{
                     fontSize: 11,
                     fontWeight: selectedGame === "overall" ? "600" : "500",
-                    color:
-                      selectedGame === "overall"
-                        ? colors.gameAccent2
-                        : colors.text,
+                    color: selectedGame === "overall" ? colors.gameAccent2 : colors.text,
                     fontFamily:
-                      selectedGame === "overall"
-                        ? "Inter_600SemiBold"
-                        : "Inter_500Medium",
+                      selectedGame === "overall" ? "Inter_600SemiBold" : "Inter_500Medium",
                   }}
                 >
                   Overall
@@ -362,46 +444,42 @@ export default function LeaderboardsSection({ playerId }) {
               </TouchableOpacity>
 
               {games
-                .filter((game) => game.name !== "Puzzle Wheel") // Remove Puzzle Wheel
-                .map((game) => (
+                .filter((g) => g.name !== "Puzzle Wheel")
+                .map((g) => (
                   <TouchableOpacity
-                    key={game.id}
-                    onPress={() => handleGameSelect(game.id.toString())}
+                    key={g.id}
+                    onPress={() => handleGameSelect(String(g.id))}
                     style={{
                       paddingHorizontal: 12,
                       paddingVertical: 6,
                       borderRadius: 16,
                       backgroundColor:
-                        selectedGame === game.id.toString()
+                        selectedGame === String(g.id)
                           ? colors.gameAccent2 + "20"
                           : colors.glassSecondary,
-                      borderWidth: selectedGame === game.id.toString() ? 1 : 0,
+                      borderWidth: selectedGame === String(g.id) ? 1 : 0,
                       borderColor: colors.gameAccent2,
                     }}
                   >
                     <Text
                       style={{
                         fontSize: 11,
-                        fontWeight:
-                          selectedGame === game.id.toString() ? "600" : "500",
+                        fontWeight: selectedGame === String(g.id) ? "600" : "500",
                         color:
-                          selectedGame === game.id.toString()
-                            ? colors.gameAccent2
-                            : colors.text,
+                          selectedGame === String(g.id) ? colors.gameAccent2 : colors.text,
                         fontFamily:
-                          selectedGame === game.id.toString()
+                          selectedGame === String(g.id)
                             ? "Inter_600SemiBold"
                             : "Inter_500Medium",
                       }}
                     >
-                      {game.name}
+                      {g.name}
                     </Text>
                   </TouchableOpacity>
                 ))}
             </View>
           </ScrollView>
 
-          {/* Time Period Label */}
           <Text
             style={{
               fontSize: 13,
@@ -411,52 +489,50 @@ export default function LeaderboardsSection({ playerId }) {
               fontFamily: "Inter_600SemiBold",
             }}
           >
-            All Time Rankings (
-            {scoreType === "playtime" ? "by playtime" : "by scores"})
+            All Time Rankings ({scoreType === "playtime" ? "by playtime" : "by scores"})
           </Text>
         </BlurView>
       </View>
 
       {/* Player's Current Rank */}
-      {getCurrentPlayerRank() && (
-        <View style={{ marginBottom: 16 }}>
-          <BlurView
-            intensity={isDark ? 40 : 60}
-            tint={isDark ? "dark" : "light"}
-            style={{
-              backgroundColor: isDark
-                ? "rgba(31, 41, 55, 0.6)"
-                : "rgba(255, 255, 255, 0.6)",
-              borderRadius: 12,
-              padding: 12,
-              borderWidth: 1,
-              borderColor: colors.gameAccent1 + "40",
-            }}
-          >
-            <Text
+      {(() => {
+        const r = getCurrentPlayerRank();
+        return r ? (
+          <View style={{ marginBottom: 16 }}>
+            <BlurView
+              intensity={isDark ? 40 : 60}
+              tint={isDark ? "dark" : "light"}
               style={{
-                fontSize: 14,
-                fontWeight: "600",
-                color: colors.text,
-                textAlign: "center",
-                fontFamily: "Inter_600SemiBold",
+                backgroundColor: isDark ? "rgba(31, 41, 55, 0.6)" : "rgba(255, 255, 255, 0.6)",
+                borderRadius: 12,
+                padding: 12,
+                borderWidth: 1,
+                borderColor: colors.gameAccent1 + "40",
               }}
             >
-              Your Rank: #{getCurrentPlayerRank()}
-            </Text>
-          </BlurView>
-        </View>
-      )}
+              <Text
+                style={{
+                  fontSize: 14,
+                  fontWeight: "600",
+                  color: colors.text,
+                  textAlign: "center",
+                  fontFamily: "Inter_600SemiBold",
+                }}
+              >
+                Your Rank: #{r}
+              </Text>
+            </BlurView>
+          </View>
+        ) : null;
+      })()}
 
-      {/* Podium */}
+      {/* ===== Podium ===== */}
       <View style={{ marginBottom: 16 }}>
         <BlurView
           intensity={isDark ? 40 : 60}
           tint={isDark ? "dark" : "light"}
           style={{
-            backgroundColor: isDark
-              ? "rgba(31, 41, 55, 0.6)"
-              : "rgba(255, 255, 255, 0.6)",
+            backgroundColor: isDark ? "rgba(31, 41, 55, 0.6)" : "rgba(255, 255, 255, 0.6)",
             borderRadius: 12,
             padding: 16,
             borderWidth: 1,
@@ -479,13 +555,13 @@ export default function LeaderboardsSection({ playerId }) {
           <View
             style={{
               flexDirection: "row",
-              alignItems: "end",
+              alignItems: "flex-end",
               justifyContent: "center",
               gap: 12,
               marginBottom: 8,
             }}
           >
-            {/* 2nd Place - Silver */}
+            {/* 2nd */}
             <View style={{ alignItems: "center", flex: 1 }}>
               <Text style={{ fontSize: 24, marginBottom: 6 }}>
                 {leaderboard[1]?.profile_emoji || "❓"}
@@ -512,24 +588,10 @@ export default function LeaderboardsSection({ playerId }) {
                   alignItems: "center",
                   borderTopLeftRadius: 12,
                   borderTopRightRadius: 12,
-                  shadowColor: "#C0C0C0",
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.3,
-                  shadowRadius: 4,
-                  elevation: 4,
                 }}
               >
                 <Text style={{ fontSize: 16, marginBottom: 2 }}>🥈</Text>
-                <Text
-                  style={{
-                    fontSize: 9,
-                    fontWeight: "700",
-                    color: "#FFFFFF",
-                    fontFamily: "Inter_700Bold",
-                  }}
-                >
-                  2nd
-                </Text>
+                <Text style={{ fontSize: 9, fontWeight: "700", color: "#FFFFFF" }}>2nd</Text>
               </View>
               <Text
                 style={{
@@ -544,7 +606,7 @@ export default function LeaderboardsSection({ playerId }) {
               </Text>
             </View>
 
-            {/* 1st Place - Gold Crown */}
+            {/* 1st */}
             <View style={{ alignItems: "center", flex: 1 }}>
               <Text style={{ fontSize: 28, marginBottom: 6 }}>
                 {leaderboard[0]?.profile_emoji || "❓"}
@@ -571,24 +633,10 @@ export default function LeaderboardsSection({ playerId }) {
                   alignItems: "center",
                   borderTopLeftRadius: 12,
                   borderTopRightRadius: 12,
-                  shadowColor: "#FFD700",
-                  shadowOffset: { width: 0, height: 4 },
-                  shadowOpacity: 0.4,
-                  shadowRadius: 8,
-                  elevation: 8,
                 }}
               >
                 <Text style={{ fontSize: 20, marginBottom: 2 }}>👑</Text>
-                <Text
-                  style={{
-                    fontSize: 11,
-                    fontWeight: "700",
-                    color: "#FFFFFF",
-                    fontFamily: "Inter_700Bold",
-                  }}
-                >
-                  1st
-                </Text>
+                <Text style={{ fontSize: 11, fontWeight: "700", color: "#FFFFFF" }}>1st</Text>
               </View>
               <Text
                 style={{
@@ -603,7 +651,7 @@ export default function LeaderboardsSection({ playerId }) {
               </Text>
             </View>
 
-            {/* 3rd Place - Bronze */}
+            {/* 3rd */}
             <View style={{ alignItems: "center", flex: 1 }}>
               <Text style={{ fontSize: 20, marginBottom: 6 }}>
                 {leaderboard[2]?.profile_emoji || "❓"}
@@ -630,24 +678,10 @@ export default function LeaderboardsSection({ playerId }) {
                   alignItems: "center",
                   borderTopLeftRadius: 12,
                   borderTopRightRadius: 12,
-                  shadowColor: "#CD7F32",
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.3,
-                  shadowRadius: 4,
-                  elevation: 4,
                 }}
               >
                 <Text style={{ fontSize: 14, marginBottom: 1 }}>🥉</Text>
-                <Text
-                  style={{
-                    fontSize: 8,
-                    fontWeight: "700",
-                    color: "#FFFFFF",
-                    fontFamily: "Inter_700Bold",
-                  }}
-                >
-                  3rd
-                </Text>
+                <Text style={{ fontSize: 8, fontWeight: "700", color: "#FFFFFF" }}>3rd</Text>
               </View>
               <Text
                 style={{
@@ -665,7 +699,7 @@ export default function LeaderboardsSection({ playerId }) {
         </BlurView>
       </View>
 
-      {/* Leaderboard List */}
+      {/* List */}
       <ScrollView
         style={{ flex: 1 }}
         showsVerticalScrollIndicator={false}
@@ -702,19 +736,13 @@ export default function LeaderboardsSection({ playerId }) {
             .slice(leaderboard.length >= 3 ? 3 : 0)
             .map((entry, index) => {
               const actualIndex = (leaderboard.length >= 3 ? 3 : 0) + index;
-              const RankIcon = getRankIcon(
-                entry.rank_position || actualIndex + 1,
-              );
-              const rankColor = getRankColor(
-                entry.rank_position || actualIndex + 1,
-              );
-              const isCurrentPlayer = entry.player_id === playerId;
+              const position = entry.rank_position || actualIndex + 1;
+              const RankIcon = getRankIcon(position);
+              const rankColor = getRankColor(position);
+              const isCurrentPlayer = Number(entry.player_id) === pid;
 
               return (
-                <View
-                  key={entry.player_id || index}
-                  style={{ marginBottom: 8 }}
-                >
+                <View key={`${entry.player_id}-${index}`} style={{ marginBottom: 8 }}>
                   <BlurView
                     intensity={isDark ? 40 : 60}
                     tint={isDark ? "dark" : "light"}
@@ -725,16 +753,11 @@ export default function LeaderboardsSection({ playerId }) {
                       borderRadius: 8,
                       padding: 12,
                       borderWidth: isCurrentPlayer ? 2 : 1,
-                      borderColor: isCurrentPlayer
-                        ? colors.gameAccent1
-                        : colors.border,
+                      borderColor: isCurrentPlayer ? colors.gameAccent1 : colors.border,
                       minHeight: 60,
                     }}
                   >
-                    <View
-                      style={{ flexDirection: "row", alignItems: "center" }}
-                    >
-                      {/* Rank Icon */}
+                    <View style={{ flexDirection: "row", alignItems: "center" }}>
                       <View
                         style={{
                           width: 32,
@@ -749,7 +772,6 @@ export default function LeaderboardsSection({ playerId }) {
                         <RankIcon size={16} color={rankColor} />
                       </View>
 
-                      {/* Player Info */}
                       <View style={{ flex: 1 }}>
                         <View
                           style={{
@@ -786,10 +808,7 @@ export default function LeaderboardsSection({ playerId }) {
                         </View>
 
                         <View
-                          style={{
-                            flexDirection: "row",
-                            justifyContent: "space-between",
-                          }}
+                          style={{ flexDirection: "row", justifyContent: "space-between" }}
                         >
                           <Text
                             style={{
@@ -798,7 +817,7 @@ export default function LeaderboardsSection({ playerId }) {
                               fontFamily: "Inter_400Regular",
                             }}
                           >
-                            Rank #{entry.rank_position || actualIndex + 1}
+                            Rank #{position}
                           </Text>
                         </View>
                       </View>

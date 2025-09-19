@@ -5,6 +5,7 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
+  Alert, // 🔑 ADDED
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -15,6 +16,7 @@ import { router } from "expo-router";
 import {
   ArrowLeft,
   Edit3,
+  LogOut, // 🔑 ADDED
   Trophy,
   Clock,
   Target,
@@ -57,13 +59,25 @@ export default function ProfileScreen() {
     Inter_700Bold,
   });
 
+  // 🔑 ADDED: logout clears local player id + signs out of Supabase, then navigates to start/login
+  const handleLogout = async () => {
+    try {
+      // If you use Supabase Auth anywhere, this safely signs out (no-op if already signed out)
+      await supabase.auth.signOut();
+      // Clear your local auto-login id so app opens logged out
+      await AsyncStorage.removeItem("puzzle_hub_player_id");
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      router.replace("/"); // ⬅️ change this to your login route if different
+    } catch (e) {
+      Alert.alert("Logout failed", e?.message || "Please try again.");
+    }
+  };
+
   // Load playerId
   useEffect(() => {
     const loadPlayerId = async () => {
       try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id",
-        );
+        const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
         if (savedPlayerId) {
           setCurrentPlayerId(parseInt(savedPlayerId));
         } else {
@@ -148,21 +162,41 @@ export default function ProfileScreen() {
     refetchIntervalInBackground: false,
   });
 
-  // ✅ Fetch games with stats
-  const { data: games = [] } = useQuery({
-    queryKey: ["games", currentPlayerId],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("games")
-        .select("*, player_game_stats(*)")
-        .eq("player_game_stats.player_id", currentPlayerId);
-      if (error) throw error;
-      return data || [];
-    },
-    enabled: !!currentPlayerId,
-    refetchInterval: 60000,
-    refetchIntervalInBackground: false,
-  });
+// ⬇️ replace the current stats useQuery with this
+const { data: stats = [] } = useQuery({
+  queryKey: ["player-stats-with-names", currentPlayerId],
+  enabled: !!currentPlayerId,
+  queryFn: async () => {
+    // a) raw stats for this player
+    const { data: rawStats, error: sErr } = await supabase
+      .from("player_game_stats")
+      .select("game_id, total_plays, total_playtime_seconds")
+      .eq("player_id", currentPlayerId);
+
+    if (sErr) throw sErr;
+    const rows = rawStats ?? [];
+    if (rows.length === 0) return [];
+
+    // b) fetch names for those game_ids
+    const gameIds = Array.from(new Set(rows.map(r => r.game_id).filter(Boolean)));
+    const { data: gameRows, error: gErr } = await supabase
+      .from("games")
+      .select("id, name")
+      .in("id", gameIds);
+
+    if (gErr) throw gErr;
+    const nameById = new Map((gameRows ?? []).map(g => [g.id, g.name]));
+
+    // c) attach game_name to each stat row
+    return rows.map(r => ({
+      ...r,
+      game_name: nameById.get(r.game_id) ?? "Unknown",
+    }));
+  },
+  refetchInterval: 60000,
+  refetchIntervalInBackground: false,
+});
+
 
   // ✅ Mutations
   const updatePlayerMutation = useMutation({
@@ -223,24 +257,27 @@ export default function ProfileScreen() {
     return playtimeTracker.getTimeToNextLevel(totalPlaytimeSeconds);
   };
 
-  const getTopGames = () => {
-    const playedGames = games.filter(
-      (g) => g.player_game_stats?.[0]?.total_playtime_seconds > 0,
-    );
-    return playedGames
-      .sort(
-        (a, b) =>
-          (b.player_game_stats?.[0]?.total_playtime_seconds || 0) -
-          (a.player_game_stats?.[0]?.total_playtime_seconds || 0),
-      )
-      .slice(0, 3)
-      .map((game) => ({
-        gameId: game.id,
-        gameName: game.name,
-        totalPlaytime: game.player_game_stats?.[0]?.total_playtime_seconds || 0,
-        totalPlays: game.player_game_stats?.[0]?.total_games || 0,
-      }));
-  };
+ const getTopGames = () => {
+  const played = (stats ?? []).filter(
+    (s) => (s.total_playtime_seconds ?? 0) > 0
+  );
+
+  return played
+    .sort(
+      (a, b) =>
+        (b.total_playtime_seconds ?? 0) -
+        (a.total_playtime_seconds ?? 0)
+    )
+    .slice(0, 3)
+    .map((row, idx) => ({
+      gameId: row.game_id,
+      gameName: row.game_name,                 // from the name-join you did above
+      totalPlaytime: row.total_playtime_seconds ?? 0,
+      totalPlays: row.total_plays ?? 0,
+      rank: idx + 1,
+    }));
+};
+
 
   const groupAchievements = () => {
     const completed = achievements.filter((a) => a.is_completed);
@@ -303,10 +340,11 @@ export default function ProfileScreen() {
   const title = getPlayerTitle(level);
   const topGames = getTopGames();
   const timeToNext = getTimeToNextLevel();
-  const totalGamesPlayed = games.reduce(
-    (total, g) => total + (g.player_game_stats?.[0]?.total_games || 0),
-    0,
-  );
+  const totalGamesPlayed = (stats ?? []).reduce(
+  (sum, s) => sum + (s.total_plays ?? 0),
+  0
+);
+
   const totalScore = gameSessions.reduce(
     (total, session) => total + session.score,
     0,
@@ -368,16 +406,31 @@ export default function ProfileScreen() {
             Player Profile
           </Text>
 
-          <TouchableOpacity
-            onPress={handleEditName}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <Edit3 size={20} color={colors.text} />
-          </TouchableOpacity>
+          {/* Right-side actions: Logout + Edit */}
+          <View style={{ flexDirection: "row", gap: 12 }}>
+            {/* 🔑 ADDED: Logout button */}
+            <TouchableOpacity
+              onPress={handleLogout}
+              style={{
+                padding: 8,
+                borderRadius: 12,
+                backgroundColor: colors.glassSecondary,
+              }}
+            >
+              <LogOut size={20} color={colors.text} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={handleEditName}
+              style={{
+                padding: 8,
+                borderRadius: 12,
+                backgroundColor: colors.glassSecondary,
+              }}
+            >
+              <Edit3 size={20} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Game Invitations Section */}
