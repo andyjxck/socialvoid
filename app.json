@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-
     "ios": {
       "bundleIdentifier": "com.createinc.6a9a88925dfd40fd95d12c13e2b26983",
       "buildNumber": "1",
@@ -16,7 +15,6 @@
         "ITSAppUsesNonExemptEncryption": false
       }
     },
-
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
@@ -28,21 +26,54 @@
       ],
       "package": "xyz.create.CreateExpoEnvironment"
     },
-
     "plugins": [
-      ["expo-router", { "sitemap": false }],
-      ["expo-splash-screen", { "image": "./assets/images/splash-icon.png", "imageWidth": 200, "resizeMode": "contain" }],
+      [
+        "expo-router",
+        {
+          "sitemap": false
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain"
+        }
+      ],
       "expo-audio",
-      ["expo-build-properties", { "ios": { "useFrameworks": "static" } }],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static"
+          }
+        }
+      ],
       "expo-video",
       "expo-font",
       "expo-secure-store",
       "expo-web-browser"
     ],
-
-    "web": { "bundler": "metro", "favicon": "./assets/images/favicon.png" },
-    "experiments": { "typedRoutes": true },
-    "extra": { "router": { "origin": false } },
-    "runtimeVersion": { "policy": "appVersion" }
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ]
   }
 }
