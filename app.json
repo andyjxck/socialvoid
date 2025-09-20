@@ -2,7 +2,7 @@
   "expo": {
     "name": "Game Void",
     "slug": "game-void",
-    "version": "1.2.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "automatic",
