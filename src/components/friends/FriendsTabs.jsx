@@ -1,3 +1,4 @@
+// src/components/friends/FriendsTabs.jsx
 import React from "react";
 import { View, Text, ScrollView, TouchableOpacity } from "react-native";
 import { useTheme } from "../../utils/theme";
@@ -7,87 +8,66 @@ import { useFonts, Inter_500Medium, Inter_600SemiBold } from "@expo-google-fonts
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "../../utils/supabase";
 
-/**
- * Props:
- * - activeTab: "friends" | "requests" | "search"
- * - setActiveTab: fn(tabId)
- * - friendsCount?: number (optional; if omitted and playerId provided, this component will self-fetch)
- * - requestsCount?: number (optional; if omitted and playerId provided, this component will self-fetch)
- * - playerId?: number (optional; enables self-fetch when counts are not provided)
- */
 export default function FriendsTabs({
   activeTab,
   setActiveTab,
   friendsCount,
   requestsCount,
-  playerId, // optional: if provided AND counts not passed, we self-fetch
+  playerId,
 }) {
   const { colors } = useTheme();
-  const [fontsLoaded] = useFonts({
-    Inter_500Medium,
-    Inter_600SemiBold,
-  });
+  const [fontsLoaded] = useFonts({ Inter_500Medium, Inter_600SemiBold });
 
   const shouldFetchCounts =
     !!playerId &&
     (typeof friendsCount !== "number" || typeof requestsCount !== "number");
 
-  // Friends = count of accepted friendships where I'm either side
-  const {
-    data: fetchedFriendsCount = 0,
-    isError: friendsErr,
-  } = useQuery({
+  const { data: fetchedFriendsCount = 0 } = useQuery({
     queryKey: ["friends-count", playerId],
     enabled: shouldFetchCounts,
     queryFn: async () => {
       const pid = Number(playerId);
       if (!pid) return 0;
-
-      // Supabase count-only query (no RPC)
       const { count, error } = await supabase
         .from("friendships")
         .select("id", { count: "exact", head: true })
         .or(`player1_id.eq.${pid},player2_id.eq.${pid}`)
         .eq("status", "accepted");
-
       if (error) throw error;
       return count ?? 0;
     },
     staleTime: 60_000,
   });
 
-  // Requests = count of incoming pending friend_requests for me
-  const {
-    data: fetchedRequestsCount = 0,
-    isError: requestsErr,
-  } = useQuery({
+  const { data: fetchedRequestsCount = 0 } = useQuery({
     queryKey: ["requests-count", playerId],
     enabled: shouldFetchCounts,
     queryFn: async () => {
       const pid = Number(playerId);
       if (!pid) return 0;
-
       const { count, error } = await supabase
         .from("friend_requests")
         .select("id", { count: "exact", head: true })
         .eq("receiver_id", pid)
         .eq("status", "pending");
-
       if (error) throw error;
       return count ?? 0;
     },
     staleTime: 60_000,
   });
 
-  // Prefer props if provided, otherwise use fetched counts
   const friendsC =
     typeof friendsCount === "number" ? friendsCount : fetchedFriendsCount;
   const requestsC =
     typeof requestsCount === "number" ? requestsCount : fetchedRequestsCount;
 
+  // Don’t show (0). Only show a badge/count when > 0.
+  const friendsLabel = friendsC > 0 ? `Friends (${friendsC})` : "Friends";
+  const requestsLabel = requestsC > 0 ? `Requests (${requestsC})` : "Requests";
+
   const tabs = [
-    { id: "friends", label: `Friends (${friendsC})`, icon: Users },
-    { id: "requests", label: `Requests (${requestsC})`, icon: Clock },
+    { id: "friends", label: friendsLabel, icon: Users },
+    { id: "requests", label: requestsLabel, icon: Clock },
     { id: "search", label: "Find Friends", icon: Search },
   ];
 
@@ -100,7 +80,6 @@ export default function FriendsTabs({
           {tabs.map((tab) => {
             const IconComponent = tab.icon;
             const isActive = activeTab === tab.id;
-
             return (
               <TouchableOpacity
                 key={tab.id}

@@ -17,9 +17,9 @@ import { supabase } from "../utils/supabase";
 export default function LeaderboardsSection({ playerId }) {
   const { colors, isDark } = useTheme();
 
-  const [selectedGame, setSelectedGame] = useState("overall"); // "overall" or gameId (string)
-  const [leaderboardType, setLeaderboardType] = useState("global"); // "global" | "friends"
-  const [scoreType, setScoreType] = useState("playtime"); // "playtime" | "scores"
+  const [selectedGame, setSelectedGame] = useState("overall");
+  const [leaderboardType, setLeaderboardType] = useState("global");
+  const [scoreType, setScoreType] = useState("playtime");
 
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -30,17 +30,31 @@ export default function LeaderboardsSection({ playerId }) {
 
   const pid = Number(playerId) || 0;
 
-  // ---- Helpers to decide what to show for each game
-  const AI_TYPES = new Set(["chess", "connect_4", "dots_and_boxes", "mancala"]);
-  const BEST_TIME_TYPES = new Set(["sudoku"]); // add more if you time them (e.g. word_search)
+  // 🔻 Names to hide from the picker (case-insensitive)
+  const EXCLUDED_GAMES = new Set([
+    "connect 4",
+    "dots and boxes",
+    "flow connect",
+    "hangman",
+    "mancala",
+    "memory match",
+    "minesweeper",
+    "word tiles",
+    "sliding puzzle",
+    "solitaire",
+    "tic tac toe",
+    "water sort",
+    "word search",
+  ]);
+
+  const AI_TYPES = new Set(["connect_4", "dots_and_boxes", "mancala"]);
+  const BEST_TIME_TYPES = new Set(["sudoku"]);
 
   const decideDisplayMode = (gameRow) => {
     if (!gameRow) return "HIGH_SCORE";
-    // If your table has this boolean, prefer it.
     if (typeof gameRow.track_best_time === "boolean") {
       return gameRow.track_best_time ? "BEST_TIME" : "HIGH_SCORE";
     }
-    // Fall back to game_type heuristics
     if (AI_TYPES.has(gameRow.game_type)) return "AI_WINS";
     if (BEST_TIME_TYPES.has(gameRow.game_type)) return "BEST_TIME";
     return "HIGH_SCORE";
@@ -52,7 +66,7 @@ export default function LeaderboardsSection({ playerId }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("games")
-        .select("id, name, game_type, track_best_time") // track_best_time is optional; ok if null/absent
+        .select("id, name, game_type, track_best_time")
         .order("id", { ascending: true });
       if (error) {
         console.warn("games error:", error);
@@ -70,7 +84,7 @@ export default function LeaderboardsSection({ playerId }) {
 
   const displayMode = selectedGame === "overall" ? null : decideDisplayMode(selectedGameRow);
 
-  // 2) Friends (ids) from friendships (accepted, either side)
+  // 2) Friends
   const { data: friends = [] } = useQuery({
     queryKey: ["friends-ids", pid, leaderboardType],
     enabled: !!pid && leaderboardType === "friends",
@@ -92,7 +106,7 @@ export default function LeaderboardsSection({ playerId }) {
     staleTime: 60_000,
   });
 
-  // 3) Leaderboard (per overall/per-game + correct stat/ordering)
+  // 3) Leaderboard
   const { data: leaderboard = [], isLoading } = useQuery({
     queryKey: [
       "leaderboard",
@@ -105,7 +119,6 @@ export default function LeaderboardsSection({ playerId }) {
     ],
     enabled: !!pid,
     queryFn: async () => {
-      // OVERALL (players)
       if (selectedGame === "overall") {
         if (scoreType === "playtime") {
           const { data, error } = await supabase
@@ -144,12 +157,10 @@ export default function LeaderboardsSection({ playerId }) {
         }
       }
 
-      // PER-GAME (player_game_stats)
       const gameId = Number(selectedGame);
       if (!Number.isFinite(gameId)) return [];
 
       if (scoreType === "playtime") {
-        // Per-game PLAYTIME (if you have this column)
         const { data: stats, error: sErr } = await supabase
           .from("player_game_stats")
           .select("player_id, total_playtime_seconds")
@@ -179,13 +190,12 @@ export default function LeaderboardsSection({ playerId }) {
           rank_position: idx + 1,
         }));
       } else {
-        // Per-game SCORES
         if (displayMode === "BEST_TIME") {
           const { data: stats, error: sErr } = await supabase
             .from("player_game_stats")
             .select("player_id, best_time, total_plays")
             .eq("game_id", gameId)
-            .order("best_time", { ascending: true, nullsFirst: false }) // lower is better
+            .order("best_time", { ascending: true, nullsFirst: false })
             .limit(50);
           if (sErr) {
             console.warn("game scores (best_time) error:", sErr);
@@ -211,7 +221,6 @@ export default function LeaderboardsSection({ playerId }) {
             rank_position: idx + 1,
           }));
         } else {
-          // HIGH_SCORE or AI_WINS both use high_score for ordering (desc)
           const { data: stats, error: sErr } = await supabase
             .from("player_game_stats")
             .select("player_id, high_score, total_plays")
@@ -244,7 +253,6 @@ export default function LeaderboardsSection({ playerId }) {
         }
       }
     },
-    // Filter to friends view (after query)
     select: (rows) => {
       if (leaderboardType !== "friends") return rows;
       const set = new Set(friends);
@@ -255,7 +263,7 @@ export default function LeaderboardsSection({ playerId }) {
     staleTime: 60_000,
   });
 
-  // ---- UI helpers
+  // UI helpers
   const formatTime = (secs) => {
     if (!Number.isFinite(secs) || secs <= 0) return "—";
     const m = Math.floor(secs / 60);
@@ -264,7 +272,6 @@ export default function LeaderboardsSection({ playerId }) {
   };
 
   const formatScore = (entry) => {
-    // Overall
     if (selectedGame === "overall") {
       if (scoreType === "playtime") {
         const s = entry.total_playtime_seconds || 0;
@@ -274,25 +281,18 @@ export default function LeaderboardsSection({ playerId }) {
       }
       return (entry.total_points || 0).toLocaleString();
     }
-
-    // Per-game
     if (scoreType === "playtime") {
       const s = entry.total_playtime_seconds || 0;
       const h = Math.floor(s / 3600);
       const m = Math.floor((s % 3600) / 60);
       return h > 0 ? `${h}h ${m}m` : `${m}m`;
     }
-
-    // Scores (per-game) — use displayMode
-    if (displayMode === "BEST_TIME") {
-      return formatTime(entry.best_time);
-    }
+    if (displayMode === "BEST_TIME") return formatTime(entry.best_time);
     if (displayMode === "AI_WINS") {
       const wins = Number(entry.high_score || 0);
       const plays = Number(entry.total_plays || 0);
       return `${wins}/${plays} wins`;
     }
-    // HIGH_SCORE
     return (entry.high_score || 0).toLocaleString();
   };
 
@@ -444,7 +444,7 @@ export default function LeaderboardsSection({ playerId }) {
               </TouchableOpacity>
 
               {games
-                .filter((g) => g.name !== "Puzzle Wheel")
+                .filter((g) => !EXCLUDED_GAMES.has((g.name || "").toLowerCase()))
                 .map((g) => (
                   <TouchableOpacity
                     key={g.id}
@@ -493,6 +493,7 @@ export default function LeaderboardsSection({ playerId }) {
           </Text>
         </BlurView>
       </View>
+
 
       {/* Player's Current Rank */}
       {(() => {

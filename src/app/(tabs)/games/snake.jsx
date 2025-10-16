@@ -1,13 +1,11 @@
-// src/app/(tabs)/games/snake.jsx
+// src/app/(tabs)/games/snake.jsx  (REPLACE ENTIRE FILE)
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Modal, BackHandler, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
-import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import { ArrowLeft, Trophy, Settings } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import {
   PanGestureHandler,
@@ -18,432 +16,262 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
-import {
-  useFonts,
-  Inter_400Regular,
-  Inter_500Medium,
-  Inter_600SemiBold,
-  Inter_700Bold,
-} from "@expo-google-fonts/inter";
+import AchievementsSection from "../../../components/AchievementsSection";
+import { useTheme } from "../../../utils/theme";
+import { useIsFocused } from "@react-navigation/native";
 
 const { width: screenWidth } = Dimensions.get("window");
 
-const DIFFICULTIES = {
-  easy: { gridSize: 15, speed: 200, name: "Easy" },
-  medium: { gridSize: 20, speed: 150, name: "Medium" },
-  hard: { gridSize: 25, speed: 100, name: "Hard" },
-};
+// constants
+const TICK_MS = 120;
+const GRID = 20;
+const PADDING = 60;
 
 export default function SnakeGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+  const isFocused = useIsFocused();
 
-  // Player & Game IDs
+  // tracking
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
-  const submittedRef = useRef(false); // prevents double-submit
+  const submittedRef = useRef(false);
 
-  // Load player id once
+  // achievements UI
+  const [showAchievements, setShowAchievements] = useState(false);
+
+  // game state
+  const [gameStarted, setGameStarted] = useState(false);
+  const [snake, setSnake] = useState([]);
+  const [food, setFood] = useState(null);
+  const [direction, setDirection] = useState("RIGHT");
+  const [score, setScore] = useState(0);
+  const [gameOver, setGameOver] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [showOver, setShowOver] = useState(false);
+
+  // refs
+  const loopRef = useRef(null);
+  const scoreRef = useRef(0);
+  const directionRef = useRef("RIGHT");
+
+  const cellSize = (screenWidth - PADDING) / GRID;
+
+  useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { directionRef.current = direction; }, [direction]);
+
+  // load player id
   useEffect(() => {
-    const loadPlayerId = async () => {
+    (async () => {
       try {
         const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
         setCurrentPlayerId(saved ? parseInt(saved, 10) : 1);
       } catch {
         setCurrentPlayerId(1);
       }
-    };
-    loadPlayerId();
+    })();
   }, []);
 
-  // Start tracking on mount; submit on unmount if needed
+  // resolve numeric game id
   useEffect(() => {
-    let mounted = true;
-    let currentGameId = null;
-
-    const setupGame = async () => {
+    let alive = true;
+    (async () => {
       if (!currentPlayerId) return;
       try {
         const id = await getGameId(GAME_TYPES.SNAKE);
-        if (!mounted) return;
-        if (id) {
-          currentGameId = id;
-          setGameId(id);
-          await gameTracker.startGame(id, currentPlayerId);
-          // console.log("🎮 Snake tracking started:", id);
-        } else {
-          console.error("❌ Could not get Snake game ID");
-        }
-      } catch (e) {
-        console.warn("startGame failed:", e?.message || e);
-      }
-    };
-
-    setupGame();
-
-    return () => {
-      mounted = false;
-      // If we leave without having submitted yet, count as a play with the last score
-      if (currentGameId && !submittedRef.current) {
-        try {
-          // We'll read the latest score via ref below
-          const finalScore = scoreRef.current || 0;
-          const meta = {
-            result: "back",
-            completed: false,
-            reason: "unmount",
-            difficulty,
-          };
-          // only attach high_score if it beats local best
-          if (finalScore > bestScoreRef.current) meta.high_score = finalScore;
-          gameTracker.endGame(currentGameId, finalScore, meta);
-          submittedRef.current = true;
-        } catch (e) {
-          console.warn("endGame on unmount failed:", e?.message || e);
-        }
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPlayerId]); // (difficulty is read from ref in unmount submit)
-
-  const [fontsLoaded] = useFonts({
-    Inter_400Regular,
-    Inter_500Medium,
-    Inter_600SemiBold,
-    Inter_700Bold,
-  });
-
-  // Game state
-  const [gameStarted, setGameStarted] = useState(false);
-  const [difficulty, setDifficulty] = useState("medium");
-  const [snake, setSnake] = useState([]);
-  const [food, setFood] = useState(null);
-  const [direction, setDirection] = useState("RIGHT");
-  const [score, setScore] = useState(0);
-  const [bestLocalScore, setBestLocalScore] = useState(0); // local best to gate high_score submits
-  const [gameOver, setGameOver] = useState(false);
-  const [paused, setPaused] = useState(false);
-
-  // Refs for latest values (so stable callbacks can use fresh state)
-  const scoreRef = useRef(0);
-  const bestScoreRef = useRef(0);
-  const difficultyRef = useRef("medium");
-  useEffect(() => { scoreRef.current = score; }, [score]);
-  useEffect(() => { bestScoreRef.current = bestLocalScore; }, [bestLocalScore]);
-  useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
-
-  // Load local best for snake
-  useEffect(() => {
-    const loadBest = async () => {
-      try {
-        const saved = await AsyncStorage.getItem("snake_scores");
-        if (saved) {
-          const { best = 0 } = JSON.parse(saved);
-          setBestLocalScore(best);
-        }
+        if (alive) setGameId(id);
       } catch {}
-    };
-    loadBest();
+    })();
+    return () => { alive = false; };
+  }, [currentPlayerId]);
+
+  // helpers
+  const randomFood = useCallback((body) => {
+    let f;
+    do {
+      f = {
+        x: Math.floor(Math.random() * GRID),
+        y: Math.floor(Math.random() * GRID),
+      };
+    } while (body.some((s) => s.x === f.x && s.y === f.y));
+    return f;
   }, []);
 
-  const saveLocalScores = useCallback(async (best) => {
-    try {
-      await AsyncStorage.setItem("snake_scores", JSON.stringify({ best }));
-    } catch {}
+  const clearLoop = useCallback(() => {
+    if (loopRef.current) {
+      clearInterval(loopRef.current);
+      loopRef.current = null;
+    }
   }, []);
 
-  const gridSize = DIFFICULTIES[difficulty].gridSize;
-  const cellSize = (screenWidth - 60) / gridSize;
-  const gameLoopRef = useRef();
-
-  // Food generator
-  const generateFood = useCallback(
-    (snakeBody) => {
-      let newFood;
-      do {
-        newFood = {
-          x: Math.floor(Math.random() * gridSize),
-          y: Math.floor(Math.random() * gridSize),
-        };
-      } while (snakeBody.some((s) => s.x === newFood.x && s.y === newFood.y));
-      return newFood;
-    },
-    [gridSize]
-  );
-
-  // Initialize a run
-  const initializeGame = useCallback(() => {
-    submittedRef.current = false; // new run not yet submitted
-    const initialSnake = [
-      { x: Math.floor(gridSize / 2), y: Math.floor(gridSize / 2) },
-    ];
-    setSnake(initialSnake);
-    setFood(generateFood(initialSnake));
+  const resetUI = useCallback(() => {
+    clearLoop();
+    setGameStarted(false);
+    setSnake([]);
+    setFood(null);
     setDirection("RIGHT");
     setScore(0);
     setGameOver(false);
     setPaused(false);
+    setShowOver(false);
+  }, [clearLoop]);
+
+  const initialize = useCallback(() => {
+    // fresh state
+    const start = [{ x: Math.floor(GRID / 2), y: Math.floor(GRID / 2) }];
+    setSnake(start);
+    setFood(randomFood(start));
+    setDirection("RIGHT");
+    directionRef.current = "RIGHT";
+    setScore(0);
+    setGameOver(false);
+    setShowOver(false);
+    setPaused(false);
     setGameStarted(true);
-  }, [gridSize, generateFood]);
+  }, [randomFood]);
 
-  // Persistent submitter (lose/back). Only attaches meta.high_score if beating local best.
-  const submitPersistent = useCallback(
-    (finalScore, reason) => {
-      if (!gameId || submittedRef.current) return;
-      try {
-        const meta = {
-          result: reason === "lose" ? "lose" : "back",
-          completed: false,
-          reason,
-          difficulty: difficultyRef.current,
-        };
-        if (finalScore > bestScoreRef.current) {
-          meta.high_score = finalScore; // backend should only update if greater anyway
-        }
-        gameTracker.endGame(gameId, finalScore, meta);
-        submittedRef.current = true;
+  // central submit-end helper
+  const endRunOnce = useCallback((reason) => {
+    if (gameId && !submittedRef.current) {
+      try { gameTracker.endGame(gameId, scoreRef.current || 0, { result: reason }); } catch {}
+      submittedRef.current = true;
+    }
+  }, [gameId]);
 
-        // update local best if beaten
-        if (finalScore > bestScoreRef.current) {
-          setBestLocalScore(finalScore);
-          saveLocalScores(finalScore);
-        }
-      } catch (e) {
-        console.warn("submitPersistent failed:", e?.message || e);
-      }
-    },
-    [gameId, saveLocalScores]
-  );
+  // restart (submit & fresh run)
+  const handleRestart = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    clearLoop();
+    endRunOnce("restart");
+    submittedRef.current = false; // allow this new run to submit later
+    initialize();
+  }, [clearLoop, endRunOnce, initialize]);
 
-  // Move snake loop
-  const moveSnake = useCallback(() => {
-    if (gameOver || paused || !gameStarted) return;
-
-    setSnake((currentSnake) => {
-      const newSnake = [...currentSnake];
-      const head = { ...newSnake[0] };
-
-      switch (direction) {
-        case "UP": head.y -= 1; break;
-        case "DOWN": head.y += 1; break;
-        case "LEFT": head.x -= 1; break;
-        case "RIGHT": head.x += 1; break;
-      }
-
-      // Walls
-      if (head.x < 0 || head.x >= gridSize || head.y < 0 || head.y >= gridSize) {
-        setGameOver(true);
-        // submit score as a loss
-        submitPersistent(scoreRef.current, "lose");
-        return currentSnake;
-      }
-
-      // Self
-      if (newSnake.some((seg) => seg.x === head.x && seg.y === head.y)) {
-        setGameOver(true);
-        submitPersistent(scoreRef.current, "lose");
-        return currentSnake;
-      }
-
-      newSnake.unshift(head);
-
-      // Food
-      if (food && head.x === food.x && head.y === food.y) {
-        setScore((prev) => {
-          const next = prev + 1;
-          // maintain local best while playing (optional UX)
-          if (next > bestScoreRef.current) {
-            setBestLocalScore(next);
-            saveLocalScores(next);
-          }
-          return next;
-        });
-        setFood(generateFood(newSnake));
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      } else {
-        newSnake.pop();
-      }
-
-      return newSnake;
-    });
-  }, [
-    direction,
-    gameOver,
-    paused,
-    gameStarted,
-    gridSize,
-    food,
-    generateFood,
-    submitPersistent,
-    saveLocalScores,
-  ]);
-
-  // Game loop timer
+  // pause when achievements modal opens
   useEffect(() => {
+    if (showAchievements) {
+      setPaused(true);
+      clearLoop();
+    }
+  }, [showAchievements, clearLoop]);
+
+  // focus/blur lifecycle: start new run on focus, end on blur
+  useEffect(() => {
+    if (!gameId || !currentPlayerId) return;
+
+    if (isFocused) {
+      // entering screen -> brand new run
+      submittedRef.current = false;
+      resetUI();
+      initialize();
+      (async () => { try { await gameTracker.startGame(gameId, currentPlayerId); } catch {} })();
+    } else {
+      // leaving screen -> end run + cleanup
+      clearLoop();
+      endRunOnce("blur");
+      resetUI(); // ensures no stale board when you return
+    }
+  }, [isFocused, gameId, currentPlayerId, initialize, clearLoop, endRunOnce, resetUI]);
+
+  // clean unmount
+  useEffect(() => {
+    return () => {
+      clearLoop();
+      endRunOnce("unmount");
+    };
+  }, [clearLoop, endRunOnce]);
+
+  // hardware back -> end + go back
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      clearLoop();
+      endRunOnce("back");
+      resetUI();
+      router.back();
+      return true;
+    });
+    return () => sub.remove();
+  }, [clearLoop, endRunOnce, resetUI]);
+
+  // movement tick
+  const tick = useCallback(() => {
+    setSnake((cur) => {
+      if (!cur.length) return cur;
+      const head = { ...cur[0] };
+      const dir = directionRef.current;
+
+      if (dir === "UP") head.y -= 1;
+      else if (dir === "DOWN") head.y += 1;
+      else if (dir === "LEFT") head.x -= 1;
+      else if (dir === "RIGHT") head.x += 1;
+
+      // walls
+      if (head.x < 0 || head.x >= GRID || head.y < 0 || head.y >= GRID) {
+        setGameOver(true);
+        return cur;
+      }
+      // self
+      if (cur.some((s) => s.x === head.x && s.y === head.y)) {
+        setGameOver(true);
+        return cur;
+      }
+
+      const next = [head, ...cur];
+
+      if (food && head.x === food.x && head.y === food.y) {
+        setScore((s) => s + 1);
+        setFood(randomFood(next));
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      } else {
+        next.pop();
+      }
+
+      return next;
+    });
+  }, [food, randomFood]);
+
+  // loop
+  useEffect(() => {
+    clearLoop();
     if (gameStarted && !gameOver && !paused) {
-      gameLoopRef.current = setInterval(
-        moveSnake,
-        DIFFICULTIES[difficulty].speed
-      );
-      return () => clearInterval(gameLoopRef.current);
+      loopRef.current = setInterval(tick, TICK_MS);
     }
-  }, [moveSnake, gameStarted, gameOver, paused, difficulty]);
+    return clearLoop;
+  }, [gameStarted, gameOver, paused, tick, clearLoop]);
 
-  // Direction change
-  const changeDirection = (newDirection) => {
-    if (gameOver || !gameStarted) return;
-    const opposites = { UP: "DOWN", DOWN: "UP", LEFT: "RIGHT", RIGHT: "LEFT" };
-    if (opposites[direction] !== newDirection) {
-      setDirection(newDirection);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  // on game over
+  useEffect(() => {
+    if (gameOver) {
+      clearLoop();
+      setShowOver(true);
+      endRunOnce("lose");
     }
-  };
+  }, [gameOver, clearLoop, endRunOnce]);
 
-  // Pause
-  const togglePause = () => {
-    if (!gameOver && gameStarted) {
-      setPaused((p) => !p);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    }
-  };
+  // interactions
+  const changeDirection = useCallback((dir) => {
+    if (!gameStarted || gameOver) return;
+    const opposite = { UP: "DOWN", DOWN: "UP", LEFT: "RIGHT", RIGHT: "LEFT" };
+    if (opposite[directionRef.current] === dir) return;
+    directionRef.current = dir;
+    setDirection(dir);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+  }, [gameStarted, gameOver]);
 
-  // Start with selected difficulty
-  const startGame = (selectedDifficulty) => {
-    setDifficulty(selectedDifficulty);
-    initializeGame();
-  };
+  const togglePause = useCallback(() => {
+    if (!gameStarted || gameOver) return;
+    setPaused((p) => !p);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+  }, [gameStarted, gameOver]);
 
-  // Back from in-game → count as a play, possibly update high_score
-  const handleBackFromGame = useCallback(() => {
-    submitPersistent(scoreRef.current, "back");
-    setGameStarted(false); // go to difficulty view
-  }, [submitPersistent]);
+  // header back
+  const handleBack = useCallback(() => {
+    clearLoop();
+    endRunOnce("back");
+    resetUI();
+    router.back();
+  }, [clearLoop, endRunOnce, resetUI]);
 
-  if (!fontsLoaded) return null;
-
-  // Difficulty selection screen
-  if (!gameStarted) {
-    return (
-      <View style={{ flex: 1 }}>
-        <StatusBar style={isDark ? "light" : "dark"} />
-        <NightSkyBackground />
-        <LinearGradient
-          colors={
-            isDark
-              ? ["rgba(17, 24, 39, 1)", "rgba(31, 41, 55, 0.8)"]
-              : ["rgba(34, 197, 94, 0.1)", "rgba(255, 255, 255, 0.9)"]
-          }
-          style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
-        />
-
-        <View
-          style={{
-            paddingTop: insets.top + 16,
-            paddingHorizontal: 20,
-            marginBottom: 40,
-          }}
-        >
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <TouchableOpacity
-              onPress={() => {
-                // leaving the screen from difficulty view — no current run to submit
-                router.back();
-              }}
-              style={{
-                padding: 8,
-                borderRadius: 12,
-                backgroundColor: colors.glassSecondary,
-              }}
-            >
-              <ArrowLeft size={24} color={colors.text} />
-            </TouchableOpacity>
-
-            <Text
-              style={{
-                fontFamily: "Inter_700Bold",
-                fontSize: 20,
-                color: colors.text,
-              }}
-            >
-              Snake
-            </Text>
-
-            <View style={{ width: 40 }} />
-          </View>
-        </View>
-
-        <View style={{ flex: 1, paddingHorizontal: 20, justifyContent: "center" }}>
-          <Text
-            style={{
-              fontFamily: "Inter_700Bold",
-              fontSize: 28,
-              color: colors.text,
-              textAlign: "center",
-              marginBottom: 12,
-            }}
-          >
-            Choose Difficulty
-          </Text>
-
-          <Text
-            style={{
-              fontFamily: "Inter_500Medium",
-              fontSize: 16,
-              color: colors.textSecondary,
-              textAlign: "center",
-              marginBottom: 40,
-            }}
-          >
-            Select board size and speed
-          </Text>
-
-          <View style={{ gap: 16 }}>
-            {Object.entries(DIFFICULTIES).map(([key, config]) => (
-              <TouchableOpacity
-                key={key}
-                onPress={() => startGame(key)}
-                style={{
-                  backgroundColor: colors.glassSecondary,
-                  borderRadius: 16,
-                  padding: 20,
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                }}
-              >
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.text,
-                    marginBottom: 4,
-                  }}
-                >
-                  {config.name}
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 14,
-                    color: colors.textSecondary,
-                  }}
-                >
-                  {config.gridSize}×{config.gridSize} grid • {config.speed}ms speed
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      </View>
-    );
-  }
-
-  // In-game screen
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
@@ -451,52 +279,34 @@ export default function SnakeGame() {
         <NightSkyBackground />
 
         {/* Header */}
-        <View
-          style={{
-            paddingTop: insets.top + 16,
-            paddingHorizontal: 20,
-            marginBottom: 20,
-          }}
-        >
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginBottom: 16,
-            }}
-          >
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, marginBottom: 20 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
             <TouchableOpacity
-              onPress={handleBackFromGame}
-              style={{
-                padding: 8,
-                borderRadius: 12,
-                backgroundColor: colors.glassSecondary,
-              }}
+              onPress={handleBack}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
             >
               <ArrowLeft size={24} color={colors.text} />
             </TouchableOpacity>
 
-            <Text
-              style={{
-                fontFamily: "Inter_700Bold",
-                fontSize: 20,
-                color: colors.text,
-              }}
-            >
-              Snake - {DIFFICULTIES[difficulty].name}
+            <Text style={{ fontWeight: "700", fontSize: 20, color: colors.text }}>
+              Snake
             </Text>
 
-            <TouchableOpacity
-              onPress={handleBackFromGame}
-              style={{
-                padding: 8,
-                borderRadius: 12,
-                backgroundColor: colors.glassSecondary,
-              }}
-            >
-              <Settings size={24} color={colors.text} />
-            </TouchableOpacity>
+            <View style={{ flexDirection: "row", gap: 10 }}>
+              <TouchableOpacity
+                onPress={() => setShowAchievements(true)}
+                style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+              >
+                <Trophy size={22} color={colors.text} />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={handleRestart}
+                style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+              >
+                <RotateCcw size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* Stats */}
@@ -505,88 +315,37 @@ export default function SnakeGame() {
               intensity={isDark ? 60 : 80}
               tint={isDark ? "dark" : "light"}
               style={{
-                backgroundColor: isDark
-                  ? "rgba(31, 41, 55, 0.7)"
-                  : "rgba(255, 255, 255, 0.7)",
+                backgroundColor: isDark ? "rgba(31,41,55,0.7)" : "rgba(255,255,255,0.7)",
                 borderWidth: 1,
                 borderColor: colors.border,
                 borderRadius: 16,
                 padding: 16,
               }}
             >
-              <View
-                style={{
-                  flexDirection: "row",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
                 <View style={{ alignItems: "center", flex: 1 }}>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_500Medium",
-                      fontSize: 12,
-                      color: colors.textSecondary,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      marginBottom: 4,
-                    }}
-                  >
+                  <Text style={{ fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", marginBottom: 4 }}>
                     Score
                   </Text>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_700Bold",
-                      fontSize: 20,
-                      color: colors.gameAccent5,
-                    }}
-                  >
-                    {score}
-                  </Text>
+                  <Text style={{ fontSize: 20, fontWeight: "700", color: colors.gameAccent5 }}>{score}</Text>
                 </View>
 
                 <View style={{ alignItems: "center", flex: 1 }}>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_500Medium",
-                      fontSize: 12,
-                      color: colors.textSecondary,
-                      textTransform: "uppercase",
-                      letterSpacing: 0.5,
-                      marginBottom: 4,
-                    }}
-                  >
+                  <Text style={{ fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", marginBottom: 4 }}>
                     Length
                   </Text>
-                  <Text
-                    style={{
-                      fontFamily: "Inter_700Bold",
-                      fontSize: 20,
-                      color: colors.text,
-                    }}
-                  >
-                    {snake.length}
-                  </Text>
+                  <Text style={{ fontSize: 20, fontWeight: "700", color: colors.text }}>{snake.length}</Text>
                 </View>
 
                 <TouchableOpacity
                   onPress={togglePause}
                   style={{
-                    paddingHorizontal: 16,
-                    paddingVertical: 8,
-                    borderRadius: 12,
+                    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12,
                     backgroundColor: colors.gameAccent5 + "20",
-                    borderWidth: 1,
-                    borderColor: colors.gameAccent5,
+                    borderWidth: 1, borderColor: colors.gameAccent5
                   }}
                 >
-                  <Text
-                    style={{
-                      fontFamily: "Inter_600SemiBold",
-                      fontSize: 12,
-                      color: colors.gameAccent5,
-                    }}
-                  >
+                  <Text style={{ fontSize: 12, fontWeight: "600", color: colors.gameAccent5 }}>
                     {paused ? "PLAY" : "PAUSE"}
                   </Text>
                 </TouchableOpacity>
@@ -595,7 +354,7 @@ export default function SnakeGame() {
           </View>
         </View>
 
-        {/* Board & swipe */}
+        {/* Board + Swipe */}
         <PanGestureHandler
           onHandlerStateChange={(event) => {
             if (event.nativeEvent.state === State.END) {
@@ -613,25 +372,27 @@ export default function SnakeGame() {
         >
           <View
             style={{
-              width: gridSize * cellSize,
-              height: gridSize * cellSize,
+              width: GRID * cellSize,
+              height: GRID * cellSize,
               backgroundColor: colors.glassSecondary,
               borderRadius: 12,
               alignSelf: "center",
               marginBottom: 20,
+              borderWidth: 1,
+              borderColor: colors.border,
             }}
           >
+            {/* Snake */}
             {snake.map((segment, index) => (
               <View
-                key={index}
+                key={`${segment.x}_${segment.y}_${index}`}
                 style={{
                   position: "absolute",
                   left: segment.x * cellSize,
                   top: segment.y * cellSize,
                   width: cellSize,
                   height: cellSize,
-                  backgroundColor:
-                    index === 0 ? colors.gameAccent5 : colors.gameAccent5 + "80",
+                  backgroundColor: index === 0 ? colors.gameAccent5 : colors.gameAccent5 + "BF",
                   borderRadius: index === 0 ? cellSize / 3 : cellSize / 6,
                   borderWidth: index === 0 ? 1 : 0,
                   borderColor: colors.background,
@@ -639,6 +400,7 @@ export default function SnakeGame() {
               />
             ))}
 
+            {/* Food */}
             {food && (
               <View
                 style={{
@@ -657,89 +419,41 @@ export default function SnakeGame() {
           </View>
         </PanGestureHandler>
 
-        {/* Controls */}
+        {/* Controls (tap OR swipe) */}
         <View style={{ alignSelf: "center", marginBottom: 20 }}>
           {/* Up */}
           <View style={{ alignItems: "center", marginBottom: 8 }}>
             <TouchableOpacity
               onPress={() => changeDirection("UP")}
               style={{
-                width: 60,
-                height: 60,
-                backgroundColor: colors.glassSecondary,
-                borderRadius: 30,
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: colors.border,
+                width: 60, height: 60, backgroundColor: colors.glassSecondary, borderRadius: 30,
+                justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.border
               }}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 24,
-                  color: colors.gameAccent5,
-                }}
-              >
-                ↑
-              </Text>
+              <Text style={{ fontWeight: "700", fontSize: 24, color: colors.gameAccent5 }}>↑</Text>
             </TouchableOpacity>
           </View>
 
           {/* Left / Pause / Right */}
-          <View
-            style={{
-              flexDirection: "row",
-              justifyContent: "center",
-              alignItems: "center",
-              gap: 12,
-              marginBottom: 8,
-            }}
-          >
+          <View style={{ flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 12, marginBottom: 8 }}>
             <TouchableOpacity
               onPress={() => changeDirection("LEFT")}
               style={{
-                width: 60,
-                height: 60,
-                backgroundColor: colors.glassSecondary,
-                borderRadius: 30,
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: colors.border,
+                width: 60, height: 60, backgroundColor: colors.glassSecondary, borderRadius: 30,
+                justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.border
               }}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 24,
-                  color: colors.gameAccent5,
-                }}
-              >
-                ←
-              </Text>
+              <Text style={{ fontWeight: "700", fontSize: 24, color: colors.gameAccent5 }}>←</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               onPress={togglePause}
               style={{
-                width: 70,
-                height: 50,
-                backgroundColor: colors.gameAccent5 + "20",
-                borderRadius: 12,
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: colors.gameAccent5,
+                width: 80, height: 50, backgroundColor: colors.gameAccent5 + "20", borderRadius: 12,
+                justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.gameAccent5
               }}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_600SemiBold",
-                  fontSize: 12,
-                  color: colors.gameAccent5,
-                }}
-              >
+              <Text style={{ fontWeight: "600", fontSize: 12, color: colors.gameAccent5 }}>
                 {paused ? "PLAY" : "PAUSE"}
               </Text>
             </TouchableOpacity>
@@ -747,25 +461,11 @@ export default function SnakeGame() {
             <TouchableOpacity
               onPress={() => changeDirection("RIGHT")}
               style={{
-                width: 60,
-                height: 60,
-                backgroundColor: colors.glassSecondary,
-                borderRadius: 30,
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: colors.border,
+                width: 60, height: 60, backgroundColor: colors.glassSecondary, borderRadius: 30,
+                justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.border
               }}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 24,
-                  color: colors.gameAccent5,
-                }}
-              >
-                →
-              </Text>
+              <Text style={{ fontWeight: "700", fontSize: 24, color: colors.gameAccent5 }}>→</Text>
             </TouchableOpacity>
           </View>
 
@@ -774,218 +474,137 @@ export default function SnakeGame() {
             <TouchableOpacity
               onPress={() => changeDirection("DOWN")}
               style={{
-                width: 60,
-                height: 60,
-                backgroundColor: colors.glassSecondary,
-                borderRadius: 30,
-                justifyContent: "center",
-                alignItems: "center",
-                borderWidth: 1,
-                borderColor: colors.border,
+                width: 60, height: 60, backgroundColor: colors.glassSecondary, borderRadius: 30,
+                justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: colors.border
               }}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 24,
-                  color: colors.gameAccent5,
-                }}
-              >
-                ↓
-              </Text>
+              <Text style={{ fontWeight: "700", fontSize: 24, color: colors.gameAccent5 }}>↓</Text>
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Instructions */}
-        <Text
-          style={{
-            fontFamily: "Inter_500Medium",
-            fontSize: 14,
-            color: colors.textSecondary,
-            textAlign: "center",
-            paddingBottom: insets.bottom + 20,
-          }}
+        {/* Game Over Modal */}
+        <Modal
+          visible={showOver}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowOver(false)}
         >
-          Use controls or swipe on the board to move the snake!
-        </Text>
-
-        {/* Pause overlay */}
-        {paused && !gameOver && (
-          <View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: "rgba(0, 0, 0, 0.7)",
-              justifyContent: "center",
-              alignItems: "center",
-            }}
-          >
+          <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", alignItems: "center" }}>
             <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
               <BlurView
                 intensity={isDark ? 80 : 100}
                 tint={isDark ? "dark" : "light"}
                 style={{
-                  backgroundColor: isDark
-                    ? "rgba(31, 41, 55, 0.9)"
-                    : "rgba(255, 255, 255, 0.9)",
+                  backgroundColor: isDark ? "rgba(31,41,55,0.9)" : "rgba(255,255,255,0.9)",
                   borderWidth: 1,
                   borderColor: colors.border,
                   borderRadius: 20,
-                  padding: 32,
+                  padding: 28,
                   alignItems: "center",
+                  width: 300,
                 }}
               >
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 24,
-                    color: colors.text,
-                    textAlign: "center",
-                    marginBottom: 20,
-                  }}
-                >
-                  Game Paused
-                </Text>
-
-                <TouchableOpacity
-                  onPress={togglePause}
-                  style={{
-                    backgroundColor: colors.primaryButton,
-                    paddingHorizontal: 24,
-                    paddingVertical: 12,
-                    borderRadius: 12,
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontFamily: "Inter_600SemiBold",
-                      fontSize: 16,
-                      color: colors.primaryButtonText,
-                    }}
-                  >
-                    Resume
-                  </Text>
-                </TouchableOpacity>
-              </BlurView>
-            </View>
-          </View>
-        )}
-
-        {/* Game over overlay */}
-        {gameOver && (
-          <View
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              backgroundColor: "rgba(0, 0, 0, 0.7)",
-              justifyContent: "center",
-              alignItems: "center",
-            }}
-          >
-            <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
-              <BlurView
-                intensity={isDark ? 80 : 100}
-                tint={isDark ? "dark" : "light"}
-                style={{
-                  backgroundColor: isDark
-                    ? "rgba(31, 41, 55, 0.9)"
-                    : "rgba(255, 255, 255, 0.9)",
-                  borderWidth: 1,
-                  borderColor: colors.border,
-                  borderRadius: 20,
-                  padding: 32,
-                  alignItems: "center",
-                }}
-              >
-                <Trophy size={48} color={colors.gameAccent5} style={{ marginBottom: 16 }} />
-
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 24,
-                    color: colors.text,
-                    textAlign: "center",
-                    marginBottom: 8,
-                  }}
-                >
+                <Text style={{ fontWeight: "700", fontSize: 24, color: colors.text, marginBottom: 8 }}>
                   Game Over
                 </Text>
-
-                <Text
-                  style={{
-                    fontFamily: "Inter_600SemiBold",
-                    fontSize: 18,
-                    color: colors.gameAccent5,
-                    marginBottom: 8,
-                  }}
-                >
+                <Text style={{ fontWeight: "600", fontSize: 18, color: colors.gameAccent5, marginBottom: 6 }}>
                   Score: {score}
                 </Text>
-
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 14,
-                    color: colors.textSecondary,
-                    marginBottom: 20,
-                  }}
-                >
-                  Length: {snake.length} • {DIFFICULTIES[difficulty].name}
+                <Text style={{ fontWeight: "500", fontSize: 14, color: colors.textSecondary, marginBottom: 18 }}>
+                  Length: {snake.length}
                 </Text>
 
                 <View style={{ flexDirection: "row", gap: 12 }}>
                   <TouchableOpacity
-                    onPress={initializeGame}
+                    onPress={() => { setShowOver(false); initialize(); }}
                     style={{
                       backgroundColor: colors.secondaryButton,
-                      paddingHorizontal: 20,
-                      paddingVertical: 12,
-                      borderRadius: 12,
+                      paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12,
                     }}
                   >
-                    <Text
-                      style={{
-                        fontFamily: "Inter_600SemiBold",
-                        fontSize: 14,
-                        color: colors.secondaryButtonText,
-                      }}
-                    >
+                    <Text style={{ fontWeight: "600", fontSize: 14, color: colors.secondaryButtonText }}>
                       Play Again
                     </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    onPress={handleBackFromGame}
+                    onPress={handleBack}
                     style={{
                       backgroundColor: colors.primaryButton,
-                      paddingHorizontal: 20,
-                      paddingVertical: 12,
-                      borderRadius: 12,
+                      paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12,
                     }}
                   >
-                    <Text
-                      style={{
-                        fontFamily: "Inter_600SemiBold",
-                        fontSize: 14,
-                        color: colors.primaryButtonText,
-                      }}
-                    >
-                      Change Difficulty
+                    <Text style={{ fontWeight: "600", fontSize: 14, color: colors.primaryButtonText }}>
+                      Back to Hub
                     </Text>
                   </TouchableOpacity>
                 </View>
               </BlurView>
             </View>
           </View>
-        )}
+        </Modal>
       </View>
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: isDark ? "rgba(0,0,0,0.9)" : colors.background,
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.border,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: colors.text }}>
+                Snake Achievements
+              </Text>
+              <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                <Text style={{ fontWeight: "600", fontSize: 14, color: colors.textSecondary }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {currentPlayerId && gameId ? (
+                <AchievementsSection
+                  playerId={currentPlayerId}
+                  gameId={gameId}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: colors.textSecondary, textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </GestureHandlerRootView>
   );
 }

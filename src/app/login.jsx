@@ -11,10 +11,9 @@ import {
   Platform,
   ScrollView,
   StyleSheet,
-  SafeAreaView,
 } from "react-native";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../utils/theme";
 import { BlurView } from "expo-blur";
@@ -31,18 +30,7 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
-
-// ✅ Supabase client
 import { supabase } from "../utils/supabase";
-
-/**
- * Debug-friendly Login Screen (Supabase-only)
- *
- * - No API calls, no raw SQL
- * - Direct Supabase query to validate user_id + pin_code
- * - On-screen debug log to help trace flows
- * - Stores internal player.id in AsyncStorage under "puzzle_hub_player_id"
- */
 
 // === Configure these if your schema differs ===
 const SUPABASE_TABLE = "players";
@@ -104,10 +92,9 @@ export default function LoginScreenDebug() {
   };
 
   // Supabase login with timeout protection
-  const supabaseLogin = async (user_id, pin, signal) => {
+  const supabaseLogin = async (user_id, pin) => {
     pushLog("Attempting Supabase login (direct query)");
     try {
-      // NOTE: Some schemas store user_id as text; we try numeric first and gracefully fall back.
       const numericUserId = Number.isFinite(+user_id) ? parseInt(user_id, 10) : user_id;
 
       const query = supabase
@@ -117,22 +104,17 @@ export default function LoginScreenDebug() {
         .eq(COL_PIN, pin)
         .maybeSingle();
 
-      // AbortController shim for fetch-based clients (signal handled internally by supabase-js where supported)
       const timeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error("Login timed out")), LOGIN_TIMEOUT_MS)
       );
 
-      // Race timeout vs query
-      // supabase-js doesn't natively support AbortSignal everywhere; this keeps UX consistent
       const result = await Promise.race([query, timeout]);
-
       if (!result) {
         pushLog("Supabase: empty result object");
         return { success: false, error: "Unexpected empty response" };
       }
 
       const { data, error } = result;
-
       if (error) {
         pushLog(`Supabase error: ${JSON.stringify(error)}`);
         return { success: false, error: error.message || "Supabase error" };
@@ -158,14 +140,12 @@ export default function LoginScreenDebug() {
     Keyboard.dismiss();
 
     try {
-      // Keep signature compatible in case you later wire an AbortController
-      const result = await supabaseLogin(userId, pinCode, null);
+      const result = await supabaseLogin(userId, pinCode);
 
       if (result.success) {
         const player = result.player;
         pushLog(`Logged in as player.id=${player[COL_ID]} user_id=${player[COL_USER_ID]}`);
 
-        // Save internal id (player.id) — this is what the rest of app expects
         await AsyncStorage.setItem("puzzle_hub_player_id", player[COL_ID].toString());
         pushLog("Saved puzzle_hub_player_id to AsyncStorage");
 
@@ -201,12 +181,10 @@ export default function LoginScreenDebug() {
     await AsyncStorage.setItem("puzzle_hub_player_id", newPlayer[COL_ID].toString());
     try {
       queryClient.clear();
-    } catch (e) {
-      // ignore
-    }
+    } catch {}
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     Alert.alert("Account Created & Logged In 🎉", `Welcome ${newPlayer[COL_USERNAME]}!`, [
-      { text: "Continue", onPress: () => router.replace("/(tabs)") },
+      { text: "Continue", onPress: () => router.replace("/(tabs)/home") },
     ]);
   };
 
@@ -215,6 +193,7 @@ export default function LoginScreenDebug() {
   return (
     <SafeAreaView style={{ flex: 1 }}>
       <StatusBar style={isDark ? "light" : "dark"} />
+
       <LinearGradient
         colors={
           isDark
@@ -223,6 +202,7 @@ export default function LoginScreenDebug() {
         }
         style={StyleSheet.absoluteFill}
       />
+
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={{
@@ -352,38 +332,6 @@ export default function LoginScreenDebug() {
               </TouchableOpacity>
             </BlurView>
           </View>
-
-          {/* Debug Log */}
-          {debugLog.length > 0 && (
-            <View
-              style={{
-                borderRadius: 12,
-                overflow: "hidden",
-                backgroundColor: isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.04)",
-              }}
-            >
-              <Text
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  fontFamily: "Inter_600SemiBold",
-                  color: colors.text,
-                }}
-              >
-                Debug Log
-              </Text>
-              <View style={{ paddingHorizontal: 12, paddingBottom: 12 }}>
-                {debugLog.map((line, idx) => (
-                  <Text
-                    key={`${idx}-${line}`}
-                    style={{ fontFamily: "Inter_400Regular", fontSize: 12, color: colors.textSecondary, marginBottom: 4 }}
-                  >
-                    {line}
-                  </Text>
-                ))}
-              </View>
-            </View>
-          )}
         </ScrollView>
       </KeyboardAvoidingView>
 

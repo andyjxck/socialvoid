@@ -1,5 +1,6 @@
+// src/app/(tabs)/games/dots_and_boxes.jsx
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions, Alert } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Alert, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
@@ -7,13 +8,14 @@ import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
-import { ArrowLeft, RotateCcw, Play, User, Bot } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Play, User, Bot, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { supabase } from "../../../utils/supabase";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 import {
   useFonts,
   Inter_400Regular,
@@ -49,9 +51,13 @@ export default function DotsAndBoxesGame() {
   const BOX_BORDER_YOU = "rgba(96,165,250,0.9)";
   const BOX_BORDER_AI = "rgba(248,113,113,0.9)";
 
-  // Player/game IDs
+  // IDs & session
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const gameIdRef = useRef(null);
+
+  // achievements modal
+  const [showAchievements, setShowAchievements] = useState(false);
 
   // Fonts
   const [fontsLoaded] = useFonts({
@@ -83,22 +89,51 @@ export default function DotsAndBoxesGame() {
   // Live preview segment (under finger)
   const [hoverSeg, setHoverSeg] = useState(null); // {type, index} | null
 
-  // Track whether this round was fully completed (to decide submit vs cancel)
+  // submit guard
   const submittedRef = useRef(false);
+
+  // ---------- RUN SIGNALS (for achievements) ----------
+  const linesDrawnRef = useRef(0);
+  const turnsRef = useRef(0);
+  const playerCurrentChainRef = useRef(0);
+  const playerBestChainRef = useRef(0);
+  const aiBestChainRef = useRef(0);
+  const startedAtRef = useRef(Date.now());
+
+  // keep ids and scores in refs so pushSignals can be stable
+  const playerScoreRef = useRef(0);
+  const aiScoreRef = useRef(0);
+  useEffect(() => { playerScoreRef.current = playerScore; }, [playerScore]);
+  useEffect(() => { aiScoreRef.current = aiScore; }, [aiScore]);
+  useEffect(() => { gameIdRef.current = gameId; }, [gameId]);
+
+  // STABLE: push live signals without changing identity (prevents focus reset)
+  const pushSignals = useCallback(() => {
+    if (!gameIdRef.current) return;
+    gameTracker.updateGameData(gameIdRef.current, {
+      player_boxes: playerScoreRef.current,
+      ai_boxes: aiScoreRef.current,
+      lines_drawn: linesDrawnRef.current,
+      turns: turnsRef.current,
+      longest_chain_player: playerBestChainRef.current,
+      longest_chain_ai: aiBestChainRef.current,
+      elapsed_seconds: Math.floor((Date.now() - startedAtRef.current) / 1000),
+    });
+  }, []);
 
   // Load player id
   useEffect(() => {
     (async () => {
       try {
         const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
-        setCurrentPlayerId(saved ? parseInt(saved) : 1);
+        setCurrentPlayerId(saved ? parseInt(saved, 10) : 1);
       } catch {
         setCurrentPlayerId(1);
       }
     })();
   }, []);
 
-  // Load saved W/L/D for display
+  // Load saved W/L/D
   useEffect(() => {
     (async () => {
       try {
@@ -107,10 +142,9 @@ export default function DotsAndBoxesGame() {
       } catch {}
     })();
   }, []);
+
   const saveStats = useCallback(async (stats) => {
-    try {
-      await AsyncStorage.setItem("dots_and_boxes_stats", JSON.stringify(stats));
-    } catch {}
+    try { await AsyncStorage.setItem("dots_and_boxes_stats", JSON.stringify(stats)); } catch {}
   }, []);
 
   // Timer tick
@@ -131,9 +165,9 @@ export default function DotsAndBoxesGame() {
   const line = 12;
   const track = 10;
 
-  // Tolerance for snapping to a segment
-  const AXIS_TOL = Math.min(26, Math.max(16, cell * 0.22)); // px distance from axis
-  const DECISION_GAP = 6; // must beat the other axis by this many px
+  // Tolerances – a bit friendlier
+  const AXIS_TOL = Math.min(30, Math.max(18, cell * 0.28));
+  const DECISION_GAP = 8;
 
   // ---------- RULE HELPERS ----------
   const isBoxCompleted = useCallback((row, col, H, V) => {
@@ -144,65 +178,54 @@ export default function DotsAndBoxesGame() {
     return top && bottom && left && right;
   }, []);
 
-  const countNewlyCompletedByMove = useCallback(
-    (moveType, moveIndex, H, V) => {
-      const newly = [];
-      if (moveType === "horizontal") {
-        const row = Math.floor(moveIndex / (DOTS - 1));
-        const col = moveIndex % (DOTS - 1);
-        if (row < DOTS - 1 && isBoxCompleted(row, col, H, V))
-          newly.push({ index: boxIndex(row, col, DOTS) });
-        if (row > 0 && isBoxCompleted(row - 1, col, H, V))
-          newly.push({ index: boxIndex(row - 1, col, DOTS) });
-      } else {
-        const row = Math.floor(moveIndex / DOTS);
-        const col = moveIndex % DOTS;
-        if (col < DOTS - 1 && isBoxCompleted(row, col, H, V))
-          newly.push({ index: boxIndex(row, col, DOTS) });
-        if (col > 0 && isBoxCompleted(row, col - 1, H, V))
-          newly.push({ index: boxIndex(row, col - 1, DOTS) });
-      }
-      return newly;
-    },
-    [isBoxCompleted]
-  );
+  const countNewlyCompletedByMove = useCallback((moveType, moveIndex, H, V) => {
+    const newly = [];
+    if (moveType === "horizontal") {
+      const row = Math.floor(moveIndex / (DOTS - 1));
+      const col = moveIndex % (DOTS - 1);
+      if (row < DOTS - 1 && isBoxCompleted(row, col, H, V))
+        newly.push({ index: boxIndex(row, col, DOTS) });
+      if (row > 0 && isBoxCompleted(row - 1, col, H, V))
+        newly.push({ index: boxIndex(row - 1, col, DOTS) });
+    } else {
+      const row = Math.floor(moveIndex / DOTS);
+      const col = Math.floor(moveIndex % DOTS);
+      if (col < DOTS - 1 && isBoxCompleted(row, col, H, V))
+        newly.push({ index: boxIndex(row, col, DOTS) });
+      if (col > 0 && isBoxCompleted(row, col - 1, H, V))
+        newly.push({ index: boxIndex(row, col - 1, DOTS) });
+    }
+    return newly;
+  }, [isBoxCompleted]);
 
-  const createsThirdSideForAnyBox = useCallback(
-    (moveType, moveIndex, H, V) => {
-      const H2 = [...H], V2 = [...V];
-      if (moveType === "horizontal") H2[moveIndex] = 2;
-      else V2[moveIndex] = 2;
+  const createsThirdSideForAnyBox = useCallback((moveType, moveIndex, H, V) => {
+    const H2 = [...H], V2 = [...V];
+    if (moveType === "horizontal") H2[moveIndex] = 2; else V2[moveIndex] = 2;
 
-      const sidesCount = (r, c) =>
-        (H2[hIndex(r, c, DOTS)] ? 1 : 0) +
-        (H2[hIndex(r + 1, c, DOTS)] ? 1 : 0) +
-        (V2[vIndex(r, c, DOTS)] ? 1 : 0) +
-        (V2[vIndex(r, c + 1, DOTS)] ? 1 : 0);
+    const sidesCount = (r, c) =>
+      (H2[hIndex(r, c, DOTS)] ? 1 : 0) +
+      (H2[hIndex(r + 1, c, DOTS)] ? 1 : 0) +
+      (V2[vIndex(r, c, DOTS)] ? 1 : 0) +
+      (V2[vIndex(r, c + 1, DOTS)] ? 1 : 0);
 
-      if (moveType === "horizontal") {
-        const row = Math.floor(moveIndex / (DOTS - 1));
-        const col = moveIndex % (DOTS - 1);
-        if (row < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3)
-          return true;
-        if (row > 0 && boxes[boxIndex(row - 1, col, DOTS)] === 0 && sidesCount(row - 1, col) === 3)
-          return true;
-      } else {
-        const row = Math.floor(moveIndex / DOTS);
-        const col = Math.floor(moveIndex % DOTS);
-        if (col < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3)
-          return true;
-        if (col > 0 && boxes[boxIndex(row, col - 1, DOTS)] === 0 && sidesCount(row, col - 1) === 3)
-          return true;
-      }
-      return false;
-    },
-    [boxes]
-  );
+    if (moveType === "horizontal") {
+      const row = Math.floor(moveIndex / (DOTS - 1));
+      const col = Math.floor(moveIndex % (DOTS - 1));
+      if (row < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3) return true;
+      if (row > 0 && boxes[boxIndex(row - 1, col, DOTS)] === 0 && sidesCount(row - 1, col) === 3) return true;
+    } else {
+      const row = Math.floor(moveIndex / DOTS);
+      const col = Math.floor(moveIndex % DOTS);
+      if (col < DOTS - 1 && boxes[boxIndex(row, col, DOTS)] === 0 && sidesCount(row, col) === 3) return true;
+      if (col > 0 && boxes[boxIndex(row, col - 1, DOTS)] === 0 && sidesCount(row, col - 1) === 3) return true;
+    }
+    return false;
+  }, [boxes]);
 
   // ---------- GAME CONTROL ----------
   const initializeGame = useCallback(() => {
     aiRunId.current++;
-    submittedRef.current = false; // new round not submitted yet
+    submittedRef.current = false;
     setHorizontal(Array(DOTS * (DOTS - 1)).fill(0));
     setVertical(Array((DOTS - 1) * DOTS).fill(0));
     setBoxes(Array((DOTS - 1) * (DOTS - 1)).fill(0));
@@ -214,227 +237,180 @@ export default function DotsAndBoxesGame() {
     setGameStarted(true);
     setLastMove(null);
     setHoverSeg(null);
+
+    // reset run signals
+    linesDrawnRef.current = 0;
+    turnsRef.current = 0;
+    playerCurrentChainRef.current = 0;
+    playerBestChainRef.current = 0;
+    aiBestChainRef.current = 0;
+    startedAtRef.current = Date.now();
+
+    // write a clean slate to the session
+    if (gameIdRef.current) {
+      gameTracker.updateGameData(gameIdRef.current, {
+        player_boxes: 0,
+        ai_boxes: 0,
+        lines_drawn: 0,
+        turns: 0,
+        longest_chain_player: 0,
+        longest_chain_ai: 0,
+        elapsed_seconds: 0,
+      });
+    }
   }, []);
 
   // Update match result in game_player_stats
-  const updateMatchResult = useCallback(
-    async (winner) => {
-      if (!currentPlayerId || !gameId) return;
-      const { data: row, error: selErr } = await supabase
+  const updateMatchResult = useCallback(async (winner) => {
+    if (!currentPlayerId || !gameId) return;
+    const { data: row, error: selErr } = await supabase
+      .from("game_player_stats")
+      .select("id, player_wins, ai_wins, total_games")
+      .eq("player_id", currentPlayerId)
+      .eq("game_id", gameId)
+      .maybeSingle();
+    if (selErr) throw selErr;
+
+    const incPlayer = winner === "Player" ? 1 : 0;
+    const incAI = winner === "AI" ? 1 : 0;
+
+    if (!row) {
+      await supabase.from("game_player_stats").insert({
+        player_id: currentPlayerId,
+        game_id: gameId,
+        player_wins: incPlayer,
+        ai_wins: incAI,
+        total_games: 1,
+      });
+    } else {
+      await supabase
         .from("game_player_stats")
-        .select("id, player_wins, ai_wins, total_games")
-        .eq("player_id", currentPlayerId)
-        .eq("game_id", gameId)
-        .maybeSingle();
-      if (selErr) throw selErr;
-
-      const incPlayer = winner === "Player" ? 1 : 0;
-      const incAI = winner === "AI" ? 1 : 0;
-
-      if (!row) {
-        await supabase.from("game_player_stats").insert({
-          player_id: currentPlayerId,
-          game_id: gameId,
-          player_wins: incPlayer,
-          ai_wins: incAI,
-          total_games: 1,
-        });
-      } else {
-        await supabase
-          .from("game_player_stats")
-          .update({
-            player_wins: (row.player_wins || 0) + incPlayer,
-            ai_wins: (row.ai_wins || 0) + incAI,
-            total_games: (row.total_games || 0) + 1,
-          })
-          .eq("id", row.id);
-      }
-    },
-    [currentPlayerId, gameId]
-  );
+        .update({
+          player_wins: (row.player_wins || 0) + incPlayer,
+          ai_wins: (row.ai_wins || 0) + incAI,
+          total_games: (row.total_games || 0) + 1,
+        })
+        .eq("id", row.id);
+    }
+  }, [currentPlayerId, gameId]);
 
   // End game (submit once)
-  const endGame = useCallback(
-    async (pScore, aScore) => {
-      if (submittedRef.current) return;
-      submittedRef.current = true;
+  const endGame = useCallback(async (pScore, aScore) => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
 
-      aiRunId.current++;
-      setGameState("gameover");
-      const next = { ...winStats };
-      let title = "";
-      let winner = "Draw";
-      if (pScore > aScore) {
-        next.wins++;
-        title = "You won! 🏆";
-        winner = "Player";
-      } else if (aScore > pScore) {
-        next.losses++;
-        title = "AI won! 🤖";
-        winner = "AI";
-      } else {
-        next.draws++;
-        title = "It's a draw! 🤝";
-      }
-      setWinStats(next);
-      saveStats(next);
+    aiRunId.current++;
+    setGameState("gameover");
+    const next = { ...winStats };
+    let title = "";
+    let winner = "Draw";
+    let playerWon = false;
 
-      const finalScore = pScore * 10 + (pScore > aScore ? 20 : 0);
+    if (pScore > aScore) {
+      next.wins++;
+      title = "You won! 🏆";
+      winner = "Player";
+      playerWon = true;
+    } else if (aScore > pScore) {
+      next.losses++;
+      title = "AI won! 🤖";
+      winner = "AI";
+    } else {
+      next.draws++;
+      title = "It's a draw! 🤝";
+    }
+    setWinStats(next);
+    saveStats(next);
 
+    const duration = Math.floor((Date.now() - startedAtRef.current) / 1000);
+    const finalScore = pScore * 10 + (playerWon ? 20 : 0);
+
+    try { await updateMatchResult(winner); } catch (e) { console.warn("Failed to update game_player_stats:", e); }
+
+    // final push of run signals + summary
+    if (gameIdRef.current) {
       try {
-        await updateMatchResult(winner);
-      } catch (e) {
-        console.warn("Failed to update game_player_stats:", e);
-      }
+        gameTracker.updateGameData(gameIdRef.current, {
+          player_boxes: pScore,
+          ai_boxes: aScore,
+          lines_drawn: linesDrawnRef.current,
+          turns: turnsRef.current,
+          longest_chain_player: playerBestChainRef.current,
+          longest_chain_ai: aiBestChainRef.current,
+          elapsed_seconds: duration,
+          winner,
+          player_won: playerWon,
+          boxes_diff: pScore - aScore,
+        });
+        await gameTracker.endGame(gameIdRef.current, finalScore, { winner });
+      } catch {}
+    }
 
-      if (gameId) {
-        try {
-          await gameTracker.endGame(gameId, finalScore, { winner });
-        } catch {}
-      }
+    Alert.alert(
+      "Game Over!",
+      `${title}\nYou: ${pScore} boxes\nAI: ${aScore} boxes`,
+      [
+        { text: "Play Again", onPress: () => { initializeGame(); } },
+        { text: "Back to Hub", onPress: () => router.back() },
+      ]
+    );
+  }, [winStats, saveStats, initializeGame, updateMatchResult]);
 
-      Alert.alert(
-        "Game Over!",
-        `${title}\nYou: ${pScore} boxes\nAI: ${aScore} boxes`,
-        [
-          { text: "Play Again", onPress: initializeGame },
-          { text: "Back to Hub", onPress: () => router.back() },
-        ]
-      );
-    },
-    [winStats, saveStats, gameId, initializeGame, updateMatchResult]
-  );
-
-  const checkGameOverAndEnd = useCallback(
-    (B) => {
-      const total = (DOTS - 1) * (DOTS - 1);
-      const done = B.filter((b) => b !== 0).length;
-      if (done === total) {
-        const p = B.filter((b) => b === 1).length;
-        const a = B.filter((b) => b === 2).length;
-        endGame(p, a);
-        return true;
-      }
-      return false;
-    },
-    [endGame]
-  );
+  const checkGameOverAndEnd = useCallback((B) => {
+    const total = (DOTS - 1) * (DOTS - 1);
+    const done = B.filter((b) => b !== 0).length;
+    if (done === total) {
+      const p = B.filter((b) => b === 1).length;
+      const a = B.filter((b) => b === 2).length;
+      endGame(p, a);
+      return true;
+    }
+    return false;
+  }, [endGame]);
 
   // ---------- SEGMENT PICKING ----------
-  const pickSegment = useCallback(
-    (x, y) => {
-      // candidate horizontal line
-      const r = Math.round(y / cell);
-      const yLine = r * cell;
-      const hAxisDist = Math.abs(y - yLine);
+  const pickSegment = useCallback((x, y) => {
+    // x/y are already local to the inner board plane
+    x = Math.max(0, Math.min(boardInner, x));
+    y = Math.max(0, Math.min(boardInner, y));
 
-      // candidate vertical line
-      const c = Math.round(x / cell);
-      const xLine = c * cell;
-      const vAxisDist = Math.abs(x - xLine);
+    const r = Math.round(y / cell); // 0..DOTS-1
+    const c = Math.round(x / cell); // 0..DOTS-1
+    const yLine = r * cell;
+    const xLine = c * cell;
+    const hAxisDist = Math.abs(y - yLine);
+    const vAxisDist = Math.abs(x - xLine);
 
-      const canH = r >= 0 && r <= DOTS - 1 && hAxisDist <= AXIS_TOL;
-      const canV = c >= 0 && c <= DOTS - 1 && vAxisDist <= AXIS_TOL;
+    const canH = r >= 0 && r <= DOTS - 1 && hAxisDist <= AXIS_TOL;
+    const canV = c >= 0 && c <= DOTS - 1 && vAxisDist <= AXIS_TOL;
 
-      // Decide axis unambiguously
-      let chosen = null;
-      if (canH && !canV) chosen = "H";
-      else if (!canH && canV) chosen = "V";
-      else if (canH && canV) {
-        const gap = Math.abs(hAxisDist - vAxisDist);
-        if (gap < DECISION_GAP) return null; // too ambiguous — reject
-        chosen = hAxisDist < vAxisDist ? "H" : "V";
-      } else return null;
+    let chosen = null;
+    if (canH && !canV) chosen = "H";
+    else if (!canH && canV) chosen = "V";
+    else if (canH && canV) {
+      const gap = Math.abs(hAxisDist - vAxisDist);
+      if (gap < DECISION_GAP) return null;
+      chosen = hAxisDist < vAxisDist ? "H" : "V";
+    } else return null;
 
-      if (chosen === "H") {
-        // Map x to segment col
-        const minX = dot / 2;
-        const maxX = boardInner - dot / 2;
-        if (x < minX || x > maxX) return null;
-        const col = Math.min(Math.max(0, Math.floor((x - minX) / cell)), DOTS - 2);
-        const idx = hIndex(r, col, DOTS);
-        return { type: "horizontal", index: idx };
-      } else {
-        // Map y to segment row
-        const minY = dot / 2;
-        const maxY = boardInner - dot / 2;
-        if (y < minY || y > maxY) return null;
-        const row = Math.min(Math.max(0, Math.floor((y - minY) / cell)), DOTS - 2);
-        const idx = vIndex(row, c, DOTS);
-        return { type: "vertical", index: idx };
-      }
-    },
-    [cell, boardInner, AXIS_TOL]
-  );
+    const EPS = 1e-6;
 
-  // Board responder handlers
-  const onBoardMove = useCallback(
-    (e) => {
-      if (gameState !== "playing" || currentPlayer !== 1) {
-        setHoverSeg(null);
-        return;
-      }
-      const { locationX, locationY } = e.nativeEvent;
-      const seg = pickSegment(locationX, locationY);
-      if (!seg) return setHoverSeg(null);
-
-      const drawn = seg.type === "horizontal"
-        ? horizontal[seg.index] !== 0
-        : vertical[seg.index] !== 0;
-
-      setHoverSeg(drawn ? null : seg);
-    },
-    [gameState, currentPlayer, pickSegment, horizontal, vertical]
-  );
-
-  const onBoardRelease = useCallback(
-    (e) => {
-      if (gameState !== "playing" || currentPlayer !== 1) {
-        setHoverSeg(null);
-        return;
-      }
-      const { locationX, locationY } = e.nativeEvent;
-      const seg = pickSegment(locationX, locationY);
-      setHoverSeg(null);
-      if (!seg) return;
-
-      // If already drawn, ignore
-      if (
-        (seg.type === "horizontal" && horizontal[seg.index] !== 0) ||
-        (seg.type === "vertical" && vertical[seg.index] !== 0)
-      ) {
-        return;
-      }
-
-      // Place line using same logic as tap
-      const type = seg.type;
-      const index = seg.index;
-
-      const H = [...horizontal];
-      const V = [...vertical];
-      if (type === "horizontal") H[index] = 1;
-      else V[index] = 1;
-
-      setLastMove({ type, index, player: 1 });
-      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
-
-      const completed = countNewlyCompletedByMove(type, index, H, V);
-      setHorizontal(H);
-      setVertical(V);
-
-      if (completed.length > 0) {
-        const B = [...boxes];
-        completed.forEach(({ index: bi }) => (B[bi] = 1));
-        setBoxes(B);
-        setPlayerScore((s) => s + completed.length);
-        try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
-        if (checkGameOverAndEnd(B)) return; // keep turn
-      } else {
-        setCurrentPlayer(2);
-      }
-    },
-    [gameState, currentPlayer, pickSegment, horizontal, vertical, boxes, countNewlyCompletedByMove, checkGameOverAndEnd]
-  );
+    if (chosen === "H") {
+      const minX = dot / 2;
+      const maxX = boardInner - dot / 2;
+      if (x < minX || x > maxX) return null;
+      const col = Math.min(Math.max(0, Math.floor((x - minX) / cell + EPS)), DOTS - 2);
+      const idx = hIndex(r, col, DOTS);
+      return { type: "horizontal", index: idx };
+    } else {
+      const minY = dot / 2;
+      const maxY = boardInner - dot / 2;
+      if (y < minY || y > maxY) return null;
+      const row = Math.min(Math.max(0, Math.floor((y - minY) / cell + EPS)), DOTS - 2);
+      const idx = vIndex(row, c, DOTS);
+      return { type: "vertical", index: idx };
+    }
+  }, [cell, boardInner]);
 
   // ---------- AI MOVE ----------
   const makeAIMove = useCallback(() => {
@@ -462,8 +438,7 @@ export default function DotsAndBoxesGame() {
       let finishing = [], max = 0;
       for (const m of moves) {
         const H2 = [...H], V2 = [...V];
-        if (m.type === "horizontal") H2[m.index] = 2;
-        else V2[m.index] = 2;
+        if (m.type === "horizontal") H2[m.index] = 2; else V2[m.index] = 2;
         const done = countNewlyCompletedByMove(m.type, m.index, H2, V2).length;
         if (done > 0) {
           if (done > max) { max = done; finishing = [m]; }
@@ -471,9 +446,8 @@ export default function DotsAndBoxesGame() {
         }
       }
       let chosen;
-      if (finishing.length) {
-        chosen = finishing[Math.floor(Math.random() * finishing.length)];
-      } else {
+      if (finishing.length) chosen = finishing[Math.floor(Math.random() * finishing.length)];
+      else {
         const safe = moves.filter((m) => !createsThirdSideForAnyBox(m.type, m.index, H, V));
         const pool = safe.length ? safe : moves;
         chosen = pool[Math.floor(Math.random() * pool.length)];
@@ -481,12 +455,14 @@ export default function DotsAndBoxesGame() {
 
       const Hn = [...H];
       const Vn = [...V];
-      if (chosen.type === "horizontal") Hn[chosen.index] = 2;
-      else Vn[chosen.index] = 2;
+      if (chosen.type === "horizontal") Hn[chosen.index] = 2; else Vn[chosen.index] = 2;
 
       setLastMove({ type: chosen.type, index: chosen.index, player: 2 });
       setHorizontal(Hn);
       setVertical(Vn);
+
+      // update lines drawn (AI also contributes)
+      linesDrawnRef.current += 1;
 
       const gained = countNewlyCompletedByMove(chosen.type, chosen.index, Hn, Vn);
       if (gained.length) {
@@ -494,23 +470,27 @@ export default function DotsAndBoxesGame() {
         gained.forEach(({ index: bi }) => (B[bi] = 2));
         setBoxes(B);
         setAiScore((s) => s + gained.length);
+        aiBestChainRef.current = Math.max(aiBestChainRef.current, gained.length);
         try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
         if (checkGameOverAndEnd(B)) return;
         await new Promise((r) => setTimeout(r, 350));
         if (aiRunId.current !== myRun) return;
         makeAIMove(); // keep AI turn
       } else {
+        // AI turn ends -> increment turns & push signals
+        turnsRef.current += 1;
+        pushSignals();
         setCurrentPlayer(1);
       }
     };
     think();
-  }, [gameState, currentPlayer, horizontal, vertical, boxes, countNewlyCompletedByMove, createsThirdSideForAnyBox, checkGameOverAndEnd, endGame]);
+  }, [gameState, currentPlayer, horizontal, vertical, boxes, countNewlyCompletedByMove, createsThirdSideForAnyBox, checkGameOverAndEnd, endGame, pushSignals]);
 
   useEffect(() => {
     if (currentPlayer === 2 && gameState === "playing") makeAIMove();
   }, [currentPlayer, gameState, makeAIMove]);
 
-  // --------- FOCUS LIFECYCLE (reset + start / cancel on blur) ----------
+  // --------- FOCUS LIFECYCLE ----------
   useFocusEffect(
     useCallback(() => {
       let active = true;
@@ -520,13 +500,11 @@ export default function DotsAndBoxesGame() {
         try {
           const id = await getGameId(GAME_TYPES.DOTS_AND_BOXES);
           if (!active) return;
+
           setGameId(id);
-
-          // Reset board/timer on focus
-          initializeGame();
-
-          // Start tracking session
           await gameTracker.startGame(id, currentPlayerId);
+
+          initializeGame();
         } catch (e) {
           console.warn("startGame failed:", e);
         }
@@ -537,14 +515,28 @@ export default function DotsAndBoxesGame() {
       // On blur/unmount: cancel if not submitted
       return () => {
         active = false;
-        if (gameId && !submittedRef.current) {
+        const gid = gameIdRef.current;
+        if (gid && !submittedRef.current) {
           try {
-            gameTracker.endGame(gameId, 0, { cancelled: true, reason: "blur" });
+            // mark as cancelled, push partial signals
+            pushSignals();
+            gameTracker.endGame(gid, 0, { cancelled: true, reason: "blur" });
           } catch {}
         }
       };
-    }, [currentPlayerId, gameId, initializeGame])
+    }, [currentPlayerId]) // stable — won't re-run on score/signal pushes
   );
+
+  // ---------- TOUCH: measure plane & convert to local ----------
+  const planeRef = useRef(null);
+  const getLocalXY = (evt, cb) => {
+    const { pageX, pageY } = evt.nativeEvent;
+    planeRef.current?.measure((x, y, w, h, px, py) => {
+      const lx = Math.max(0, Math.min(w, pageX - px));
+      const ly = Math.max(0, Math.min(h, pageY - py));
+      cb(lx, ly);
+    });
+  };
 
   // ---------- RENDER ----------
   const formatTime = useCallback((s) => {
@@ -565,9 +557,12 @@ export default function DotsAndBoxesGame() {
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
           <TouchableOpacity
             onPress={() => {
-              // back should end the session without submit if not completed
-              if (gameId && !submittedRef.current) {
-                try { gameTracker.endGame(gameId, 0, { cancelled: true, reason: "back" }); } catch {}
+              const gid = gameIdRef.current;
+              if (gid && !submittedRef.current) {
+                try {
+                  pushSignals();
+                  gameTracker.endGame(gid, 0, { cancelled: true, reason: "back" });
+                } catch {}
               }
               router.back();
             }}
@@ -580,12 +575,32 @@ export default function DotsAndBoxesGame() {
             Dots & Boxes
           </Text>
 
-          <TouchableOpacity
-            onPress={initializeGame}
-            style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            {/* Achievements */}
+            <TouchableOpacity
+              onPress={() => { setShowAchievements(true); Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); }}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+
+            {/* Restart: end current session run cleanly, start fresh */}
+            <TouchableOpacity
+              onPress={async () => {
+                const gid = gameIdRef.current;
+                if (gid && !submittedRef.current) {
+                  try { pushSignals(); await gameTracker.endGame(gid, 0, { reason: "restart" }); } catch {}
+                }
+                if (gameIdRef.current && currentPlayerId) {
+                  await gameTracker.startGame(gameIdRef.current, currentPlayerId);
+                }
+                initializeGame();
+              }}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <RotateCcw size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         <View style={{ borderRadius: 16, overflow: "hidden" }}>
@@ -662,77 +677,81 @@ export default function DotsAndBoxesGame() {
           <View style={{ width: boardOuter, height: boardOuter }}>
             {/* INNER BOARD plane (no padding) */}
             <View
+              ref={planeRef}
               style={{ position: "absolute", left: pad, top: pad, width: boardInner, height: boardInner }}
               onStartShouldSetResponder={() => true}
               onMoveShouldSetResponder={() => true}
               onResponderGrant={(e) => {
-                if (gameState !== "playing" || currentPlayer !== 1) {
-                  setHoverSeg(null);
-                  return;
-                }
-                const { locationX, locationY } = e.nativeEvent;
-                const seg = pickSegment(locationX, locationY);
-                if (!seg) return setHoverSeg(null);
-                const drawn = seg.type === "horizontal"
-                  ? horizontal[seg.index] !== 0
-                  : vertical[seg.index] !== 0;
-                setHoverSeg(drawn ? null : seg);
+                if (gameState !== "playing" || currentPlayer !== 1) { setHoverSeg(null); return; }
+                getLocalXY(e, (lx, ly) => {
+                  const seg = pickSegment(lx, ly);
+                  if (!seg) return setHoverSeg(null);
+                  const drawn = seg.type === "horizontal" ? horizontal[seg.index] !== 0 : vertical[seg.index] !== 0;
+                  setHoverSeg(drawn ? null : seg);
+                });
               }}
               onResponderMove={(e) => {
-                if (gameState !== "playing" || currentPlayer !== 1) {
-                  setHoverSeg(null);
-                  return;
-                }
-                const { locationX, locationY } = e.nativeEvent;
-                const seg = pickSegment(locationX, locationY);
-                if (!seg) return setHoverSeg(null);
-                const drawn = seg.type === "horizontal"
-                  ? horizontal[seg.index] !== 0
-                  : vertical[seg.index] !== 0;
-                setHoverSeg(drawn ? null : seg);
+                if (gameState !== "playing" || currentPlayer !== 1) { setHoverSeg(null); return; }
+                getLocalXY(e, (lx, ly) => {
+                  const seg = pickSegment(lx, ly);
+                  if (!seg) return setHoverSeg(null);
+                  const drawn = seg.type === "horizontal" ? horizontal[seg.index] !== 0 : vertical[seg.index] !== 0;
+                  setHoverSeg(drawn ? null : seg);
+                });
               }}
               onResponderRelease={(e) => {
-                if (gameState !== "playing" || currentPlayer !== 1) {
+                if (gameState !== "playing" || currentPlayer !== 1) { setHoverSeg(null); return; }
+
+                // Recompute from release point; fallback to hoverSeg if finger lifted fast
+                getLocalXY(e, (lx, ly) => {
+                  const seg = pickSegment(lx, ly) || hoverSeg;
                   setHoverSeg(null);
-                  return;
-                }
-                const { locationX, locationY } = e.nativeEvent;
-                const seg = pickSegment(locationX, locationY);
-                setHoverSeg(null);
-                if (!seg) return;
+                  if (!seg) return;
 
-                if (
-                  (seg.type === "horizontal" && horizontal[seg.index] !== 0) ||
-                  (seg.type === "vertical" && vertical[seg.index] !== 0)
-                ) {
-                  return;
-                }
+                  // already drawn?
+                  if (
+                    (seg.type === "horizontal" && horizontal[seg.index] !== 0) ||
+                    (seg.type === "vertical" && vertical[seg.index] !== 0)
+                  ) return;
 
-                const type = seg.type;
-                const index = seg.index;
-                const H = [...horizontal];
-                const V = [...vertical];
+                  const type = seg.type;
+                  const index = seg.index;
 
-                if (type === "horizontal") H[index] = 1;
-                else V[index] = 1;
+                  const H = [...horizontal];
+                  const V = [...vertical];
+                  if (type === "horizontal") H[index] = 1; else V[index] = 1;
 
-                setLastMove({ type, index, player: 1 });
-                try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
+                  setLastMove({ type, index, player: 1 });
+                  try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
 
-                const completed = countNewlyCompletedByMove(type, index, H, V);
-                setHorizontal(H);
-                setVertical(V);
+                  // run signals
+                  linesDrawnRef.current += 1;
 
-                if (completed.length > 0) {
-                  const B = [...boxes];
-                  completed.forEach(({ index: bi }) => (B[bi] = 1));
-                  setBoxes(B);
-                  setPlayerScore((s) => s + completed.length);
-                  try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
-                  if (checkGameOverAndEnd(B)) return; // keep turn
-                } else {
-                  setCurrentPlayer(2);
-                }
+                  const completed = countNewlyCompletedByMove(type, index, H, V);
+                  setHorizontal(H);
+                  setVertical(V);
+
+                  if (completed.length > 0) {
+                    const B = [...boxes];
+                    completed.forEach(({ index: bi }) => (B[bi] = 1));
+                    setBoxes(B);
+                    setPlayerScore((s) => s + completed.length);
+
+                    // chain tracking for player
+                    playerCurrentChainRef.current += completed.length;
+                    playerBestChainRef.current = Math.max(playerBestChainRef.current, playerCurrentChainRef.current);
+
+                    try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+                    pushSignals();
+                    if (checkGameOverAndEnd(B)) return; // keep turn if not over
+                  } else {
+                    // turn passes to AI
+                    turnsRef.current += 1;
+                    playerCurrentChainRef.current = 0; // reset chain when turn ends
+                    pushSignals();
+                    setCurrentPlayer(2);
+                  }
+                });
               }}
             >
               {/* DOTS */}
@@ -778,10 +797,8 @@ export default function DotsAndBoxesGame() {
                           borderRadius: line / 2,
                           backgroundColor: owner ? (owner === 1 ? PLAYER : AI) : isHover ? "rgba(96,165,250,0.22)" : "transparent",
                           shadowColor: isLast ? (owner === 1 ? PLAYER_GLOW : AI_GLOW) : "transparent",
-                          shadowOffset: { width: 0, height: 0 },
                           shadowOpacity: isLast ? 0.9 : 0,
                           shadowRadius: isLast ? 6 : 0,
-                          elevation: isLast ? 3 : 0,
                         }}
                       />
                     </View>
@@ -809,10 +826,8 @@ export default function DotsAndBoxesGame() {
                           borderRadius: line / 2,
                           backgroundColor: owner ? (owner === 1 ? PLAYER : AI) : isHover ? "rgba(96,165,250,0.22)" : "transparent",
                           shadowColor: isLast ? (owner === 1 ? PLAYER_GLOW : AI_GLOW) : "transparent",
-                          shadowOffset: { width: 0, height: 0 },
                           shadowOpacity: isLast ? 0.9 : 0,
                           shadowRadius: isLast ? 6 : 0,
-                          elevation: isLast ? 3 : 0,
                         }}
                       />
                     </View>
@@ -847,9 +862,7 @@ export default function DotsAndBoxesGame() {
                           colors={["rgba(255,255,255,0.14)", "rgba(255,255,255,0.04)", "transparent"]}
                           style={{
                             position: "absolute",
-                            top: 0,
-                            left: 0,
-                            right: 0,
+                            top: 0, left: 0, right: 0,
                             height: 14,
                             borderTopLeftRadius: 8,
                             borderTopRightRadius: 8,
@@ -857,15 +870,7 @@ export default function DotsAndBoxesGame() {
                         />
                       )}
                       {owner !== 0 && (
-                        <View
-                          style={{
-                            backgroundColor: owner === 1 ? PLAYER : AI,
-                            borderRadius: 16,
-                            paddingHorizontal: 8,
-                            paddingVertical: 3,
-                            opacity: 0.95,
-                          }}
-                        >
+                        <View style={{ backgroundColor: owner === 1 ? PLAYER : AI, borderRadius: 16, paddingHorizontal: 8, paddingVertical: 3, opacity: 0.95 }}>
                           <Text style={{ fontFamily: "Inter_700Bold", fontSize: 11, color: "white" }}>
                             {owner === 1 ? "P" : "C"}
                           </Text>
@@ -901,7 +906,7 @@ export default function DotsAndBoxesGame() {
           </View>
         </BlurView>
 
-        {/* Start + Record */}
+        {/* Start + Record (kept) */}
         {gameState === "waiting" && (
           <>
             <TouchableOpacity
@@ -935,6 +940,62 @@ export default function DotsAndBoxesGame() {
           </>
         )}
       </View>
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }}>
+          <View style={{ marginTop: insets.top + 12, marginBottom: insets.bottom + 12, flex: 1, paddingHorizontal: 16 }}>
+            <BlurView
+              intensity={isDark ? 70 : 90}
+              tint={isDark ? "dark" : "light"}
+              style={{
+                flex: 1,
+                borderRadius: 16,
+                overflow: "hidden",
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: isDark ? "rgba(31,41,55,0.8)" : "rgba(255,255,255,0.85)",
+              }}
+            >
+              {/* Header row */}
+              <View style={{ paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: colors.text }}>
+                  Dots & Boxes Achievements
+                </Text>
+                <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                  <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 14, color: colors.textSecondary }}>
+                    Close
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Content */}
+              <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
+                {currentPlayerId && gameIdRef.current ? (
+                  <AchievementsSection
+                    playerId={currentPlayerId}
+                    gameId={gameIdRef.current}
+                    autoRefreshMs={15000}
+                    showSearchBar={true}
+                    showFilters={true}
+                  />
+                ) : (
+                  <View style={{ padding: 16 }}>
+                    <Text style={{ color: colors.textSecondary, fontFamily: "Inter_500Medium", textAlign: "center" }}>
+                      Loading achievements…
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
+            </BlurView>
+          </View>
+        </View>
+      </Modal>
 
       <View style={{ height: insets.bottom + 16 }} />
     </View>

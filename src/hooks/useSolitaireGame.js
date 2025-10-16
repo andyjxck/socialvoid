@@ -3,9 +3,7 @@ import { Alert } from "react-native";
 import * as Haptics from "expo-haptics";
 import { setupGame } from "../utils/solitaire/logic";
 
-/**
- * Minimal “playable start” check helpers
- */
+/* ---------- playable-start helpers ---------- */
 const localCanMoveTo = (card, target, targetType) => {
   if (targetType === "foundation") {
     if (target.length === 0) return card.numValue === 1;
@@ -26,11 +24,7 @@ const localGetMovableCards = (column, cardIndex) => {
     if (!column[i].faceUp) break;
     if (cards.length > 0) {
       const prev = cards[cards.length - 1];
-      if (
-        column[i].color === prev.color ||
-        column[i].numValue !== prev.numValue - 1
-      )
-        break;
+      if (column[i].color === prev.color || column[i].numValue !== prev.numValue - 1) break;
     }
     cards.push(column[i]);
   }
@@ -38,30 +32,25 @@ const localGetMovableCards = (column, cardIndex) => {
 };
 
 const hasAnyMoves = (game) => {
-  // waste -> foundation/tableau
   if (game.waste.length > 0) {
     const topWaste = game.waste[game.waste.length - 1];
     for (let i = 0; i < game.foundations.length; i++) {
-      if (localCanMoveTo(topWaste, game.foundations[i], "foundation"))
-        return true;
+      if (localCanMoveTo(topWaste, game.foundations[i], "foundation")) return true;
     }
     for (let i = 0; i < game.tableau.length; i++) {
       if (localCanMoveTo(topWaste, game.tableau[i], "tableau")) return true;
     }
   }
-  // tableau top -> foundation
   for (let col = 0; col < game.tableau.length; col++) {
     const column = game.tableau[col];
     if (column.length === 0) continue;
     const topCard = column[column.length - 1];
     if (topCard.faceUp) {
       for (let i = 0; i < game.foundations.length; i++) {
-        if (localCanMoveTo(topCard, game.foundations[i], "foundation"))
-          return true;
+        if (localCanMoveTo(topCard, game.foundations[i], "foundation")) return true;
       }
     }
   }
-  // tableau stacks -> tableau targets
   for (let s = 0; s < game.tableau.length; s++) {
     const sourceCol = game.tableau[s];
     for (let start = 0; start < sourceCol.length; start++) {
@@ -78,9 +67,7 @@ const hasAnyMoves = (game) => {
   return false;
 };
 
-/**
- * Re-deal up to 10x until the initial layout has at least one legal move.
- */
+/* ---------- playable re-deal ---------- */
 const generatePlayableGame = () => {
   for (let attempts = 0; attempts < 10; attempts++) {
     const g = setupGame();
@@ -90,7 +77,6 @@ const generatePlayableGame = () => {
 };
 
 export const useSolitaireGame = () => {
-  // stockCycles = "number of waste->stock recycles since last PROGRESS"
   const [game, setGame] = useState(generatePlayableGame());
   const [gameHistory, setGameHistory] = useState([]);
   const [stockCycles, setStockCycles] = useState(0);
@@ -98,44 +84,44 @@ export const useSolitaireGame = () => {
 
   const resetCycleOnProgress = () => setStockCycles(0);
 
-  // Save game state for undo functionality
+  /* deep clone helpers for undo (preserve faceUp correctly) */
+  const dc = (c) => ({ ...c });
+  const dc1 = (pile) => pile.map(dc);
+  const dc2 = (cols) => cols.map((col) => col.map(dc));
+
   const saveGameState = (currentGame) => {
     setGameHistory((prev) => [
       ...prev.slice(-19),
       {
         ...currentGame,
-        foundations: currentGame.foundations.map((f) => [...f]),
-        tableau: currentGame.tableau.map((t) => [...t]),
-        stock: [...currentGame.stock],
-        waste: [...currentGame.waste],
+        foundations: currentGame.foundations.map(dc1),
+        tableau: dc2(currentGame.tableau),
+        stock: dc1(currentGame.stock),
+        waste: dc1(currentGame.waste),
         selected: null,
       },
     ]);
   };
 
-  // ✅ Change you asked for: ONLY allow auto-complete when waste pile is empty
   const canAutoComplete = (gameState) => {
-    // All tableau cards must be face-up
     for (const column of gameState.tableau) {
       for (const card of column) {
         if (!card.faceUp) return false;
       }
     }
-    // Waste must be empty
     if (gameState.waste.length > 0) return false;
-    // Not already won
     if (gameState.foundations.every((f) => f.length === 13)) return false;
     return true;
   };
 
   const canMoveTo = (card, target, targetType) => {
     if (targetType === "foundation") {
-      if (target.length === 0) return card.numValue === 1; // Ace
+      if (target.length === 0) return card.numValue === 1;
       const top = target[target.length - 1];
       return card.suit === top.suit && card.numValue === top.numValue + 1;
     }
     if (targetType === "tableau") {
-      if (target.length === 0) return card.numValue === 13; // King
+      if (target.length === 0) return card.numValue === 13;
       const top = target[target.length - 1];
       return card.color !== top.color && card.numValue === top.numValue - 1;
     }
@@ -148,10 +134,7 @@ export const useSolitaireGame = () => {
       if (!column[i].faceUp) break;
       if (cards.length > 0) {
         const prev = cards[cards.length - 1];
-        if (
-          column[i].color === prev.color ||
-          column[i].numValue !== prev.numValue - 1
-        ) {
+        if (column[i].color === prev.color || column[i].numValue !== prev.numValue - 1) {
           break;
         }
       }
@@ -167,21 +150,14 @@ export const useSolitaireGame = () => {
     let currentGame = { ...gameState };
     let movesMade = true;
 
-    while (
-      movesMade &&
-      !currentGame.foundations.every((f) => f.length === 13)
-    ) {
+    while (movesMade && !currentGame.foundations.every((f) => f.length === 13)) {
       movesMade = false;
 
-      // Waste -> Foundation
       if (currentGame.waste.length > 0) {
         const topWaste = currentGame.waste[currentGame.waste.length - 1];
         for (let i = 0; i < currentGame.foundations.length; i++) {
           if (canMoveTo(topWaste, currentGame.foundations[i], "foundation")) {
-            currentGame.foundations[i] = [
-              ...currentGame.foundations[i],
-              topWaste,
-            ];
+            currentGame.foundations[i] = [...currentGame.foundations[i], topWaste];
             currentGame.waste = currentGame.waste.slice(0, -1);
             currentGame.score += 10;
             currentGame.moves++;
@@ -192,24 +168,14 @@ export const useSolitaireGame = () => {
         }
       }
 
-      // Tableau top -> Foundation
       if (!movesMade) {
-        for (
-          let colIndex = 0;
-          colIndex < currentGame.tableau.length;
-          colIndex++
-        ) {
+        for (let colIndex = 0; colIndex < currentGame.tableau.length; colIndex++) {
           const column = currentGame.tableau[colIndex];
           if (column.length > 0) {
             const topCard = column[column.length - 1];
             for (let i = 0; i < currentGame.foundations.length; i++) {
-              if (
-                canMoveTo(topCard, currentGame.foundations[i], "foundation")
-              ) {
-                currentGame.foundations[i] = [
-                  ...currentGame.foundations[i],
-                  topCard,
-                ];
+              if (canMoveTo(topCard, currentGame.foundations[i], "foundation")) {
+                currentGame.foundations[i] = [...currentGame.foundations[i], topCard];
                 currentGame.tableau[colIndex] = column.slice(0, -1);
                 currentGame.score += 10;
                 currentGame.moves++;
@@ -232,25 +198,22 @@ export const useSolitaireGame = () => {
     setIsAutoCompleting(false);
   };
 
-  // Win/Lose + Auto-complete prompt logic
+  /* Win/Lose & autocomplete prompts */
   useEffect(() => {
-    // Win
     if (game.foundations.every((f) => f.length === 13)) {
       Alert.alert("🎉 You Won!", `Congratulations! Score: ${game.score}`);
       return;
     }
 
-    // LOSS: strictly after 5 recycles with NO progress in between.
     if (stockCycles >= 5) {
       Alert.alert(
-        "😔 Game Over",
+        "😕 Game Over",
         "You've recycled the stock 5 times without making progress.",
         [{ text: "New Game", onPress: () => resetGame() }]
       );
       return;
     }
 
-    // Auto-complete available (only if waste is empty per your request)
     if (canAutoComplete(game) && !isAutoCompleting) {
       Alert.alert(
         "🎉 Auto-Complete Available!",
@@ -261,15 +224,8 @@ export const useSolitaireGame = () => {
         ]
       );
     }
-  }, [
-    game.foundations,
-    stockCycles,
-    game.stock.length,
-    game.waste.length,
-    isAutoCompleting,
-  ]);
+  }, [game.foundations, stockCycles, game.stock.length, game.waste.length, isAutoCompleting]);
 
-  // Undo last move
   const undoLastMove = async () => {
     if (gameHistory.length === 0) {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -279,10 +235,8 @@ export const useSolitaireGame = () => {
     const previousState = gameHistory[gameHistory.length - 1];
     setGame(previousState);
     setGameHistory((prev) => prev.slice(0, -1));
-    // We don't touch stockCycles on undo.
   };
 
-  // Try auto-placing a card into a foundation
   const tryAutoPlaceInSafeZone = async (card, source, cardIndex) => {
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
@@ -293,19 +247,16 @@ export const useSolitaireGame = () => {
           saveGameState(prevGame);
           const newGame = { ...prevGame };
 
-          // Add to foundation
           const newFoundations = [...newGame.foundations];
           newFoundations[i] = [...foundation, card];
           newGame.foundations = newFoundations;
 
-          // Remove from source
           if (source.type === "tableau") {
             const sourceIndex = newGame.tableau.indexOf(source.column);
             const newSourceColumn = [...source.column];
             newSourceColumn.splice(cardIndex, 1);
             newGame.tableau[sourceIndex] = newSourceColumn;
 
-            // Flip top if needed (progress)
             const topCard = newSourceColumn[newSourceColumn.length - 1];
             if (topCard && !topCard.faceUp) {
               topCard.faceUp = true;
@@ -320,7 +271,7 @@ export const useSolitaireGame = () => {
           newGame.moves++;
           newGame.selected = null;
 
-          resetCycleOnProgress(); // PROGRESS!
+          resetCycleOnProgress();
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           return newGame;
         });
@@ -334,7 +285,6 @@ export const useSolitaireGame = () => {
 
   const handleCardPress = async (card, source, cardIndex) => {
     if (isAutoCompleting) return;
-
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     if (!game.selected) {
@@ -347,24 +297,17 @@ export const useSolitaireGame = () => {
       return;
     }
 
-    // Try to move selected cards to this location
     setGame((prevGame) => {
       const newGame = { ...prevGame };
       const { cards: selectedCards, source: selectedSource } = newGame.selected;
       let canMove = false;
 
       if (source.type === "foundation") {
-        if (
-          selectedCards.length === 1 &&
-          canMoveTo(selectedCards[0], source.column, "foundation")
-        ) {
+        if (selectedCards.length === 1 && canMoveTo(selectedCards[0], source.column, "foundation")) {
           saveGameState(prevGame);
           const newFoundations = [...newGame.foundations];
           const foundationIndex = newGame.foundations.indexOf(source.column);
-          newFoundations[foundationIndex] = [
-            ...source.column,
-            selectedCards[0],
-          ];
+          newFoundations[foundationIndex] = [...source.column, selectedCards[0]];
           newGame.foundations = newFoundations;
           canMove = true;
           newGame.score += 10;
@@ -396,9 +339,14 @@ export const useSolitaireGame = () => {
         } else if (selectedSource.type === "waste") {
           newGame.waste = [...newGame.waste];
           newGame.waste.pop();
+        } else if (selectedSource.type === "foundation") {
+          const fIndex = newGame.foundations.indexOf(selectedSource.column);
+          const newFoundation = [...selectedSource.column];
+          newFoundation.pop();
+          newGame.foundations[fIndex] = newFoundation;
         }
         newGame.moves++;
-        resetCycleOnProgress(); // PROGRESS!
+        resetCycleOnProgress();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -411,7 +359,6 @@ export const useSolitaireGame = () => {
 
   const handleEmptySpacePress = async (target, targetType) => {
     if (!game.selected || isAutoCompleting) return;
-
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
     setGame((prevGame) => {
@@ -456,9 +403,14 @@ export const useSolitaireGame = () => {
         } else if (selectedSource.type === "waste") {
           newGame.waste = [...newGame.waste];
           newGame.waste.pop();
+        } else if (selectedSource.type === "foundation") {
+          const fIndex = newGame.foundations.indexOf(selectedSource.column);
+          const newFoundation = [...selectedSource.column];
+          newFoundation.pop();
+          newGame.foundations[fIndex] = newFoundation;
         }
         newGame.moves++;
-        resetCycleOnProgress(); // PROGRESS!
+        resetCycleOnProgress();
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -471,7 +423,6 @@ export const useSolitaireGame = () => {
 
   const handleStockPress = async () => {
     if (isAutoCompleting) return;
-
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     setGame((prevGame) => {
@@ -483,7 +434,6 @@ export const useSolitaireGame = () => {
       };
 
       if (newGame.stock.length > 0) {
-        // Draw up to 3 cards to waste (drawing is not "progress" yet)
         saveGameState(prevGame);
         const cardsToDraw = Math.min(3, newGame.stock.length);
         for (let i = 0; i < cardsToDraw; i++) {
@@ -493,11 +443,8 @@ export const useSolitaireGame = () => {
         }
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       } else if (newGame.waste.length > 0) {
-        // Recycle waste -> stock (this increments the "since progress" counter)
         saveGameState(prevGame);
-        newGame.stock = newGame.waste
-          .map((card) => ({ ...card, faceUp: false }))
-          .reverse();
+        newGame.stock = newGame.waste.map((c) => ({ ...c, faceUp: false })).reverse();
         newGame.waste = [];
         newGame.score = Math.max(0, newGame.score - 10);
         setStockCycles((prev) => prev + 1);
@@ -516,16 +463,15 @@ export const useSolitaireGame = () => {
     setIsAutoCompleting(false);
   };
 
-  const isSelected = (card) => {
-    return game.selected?.cards.some((c) => c.id === card.id) || false;
-  };
+  const isSelected = (card) =>
+    game.selected?.cards.some((c) => c.id === card.id) || false;
 
   return {
     game,
     resetGame,
     undoLastMove,
     canUndo: gameHistory.length > 0,
-    stockCycles, // recycles since last progress
+    stockCycles,
     isAutoCompleting,
     handleCardPress,
     handleEmptySpacePress,

@@ -1,5 +1,6 @@
+// mobile/src/components/friends/FriendsSection.jsx
 import React, { useState } from "react";
-import { View, ScrollView, Alert } from "react-native";
+import { View, ScrollView, Alert, Text } from "react-native";
 import * as Haptics from "expo-haptics";
 import {
   useFonts,
@@ -16,7 +17,12 @@ import FriendRequests from "./friends/FriendRequests";
 import AddFriend from "./friends/AddFriend";
 import ChatModal from "./friends/ChatModal";
 
-export default function FriendsSection({ playerId }) {
+/**
+ * Props:
+ * - userId: INTEGER -> players.user_id for the signed-in user
+ * - playerId: INTEGER -> players.id for the signed-in user
+ */
+export default function FriendsSection({ userId, playerId }) {
   const [activeTab, setActiveTab] = useState("friends");
   const [chatModalVisible, setChatModalVisible] = useState(false);
   const [selectedFriend, setSelectedFriend] = useState(null);
@@ -29,14 +35,14 @@ export default function FriendsSection({ playerId }) {
   });
 
   const {
-    friends,
+    friends = [],
     friendsLoading,
-    requests,
+    requests = [],
     sendRequest,
     isSendingRequest,
     removeFriend,
     respondToRequest,
-  } = useFriends(playerId);
+  } = useFriends(userId);
 
   const handleRemoveFriend = (friendId, friendName) => {
     Alert.alert(
@@ -44,12 +50,8 @@ export default function FriendsSection({ playerId }) {
       `Are you sure you want to remove ${friendName} from your friends?`,
       [
         { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () => removeFriend(friendId),
-        },
-      ],
+        { text: "Remove", style: "destructive", onPress: () => removeFriend(friendId) },
+      ]
     );
   };
 
@@ -68,28 +70,29 @@ export default function FriendsSection({ playerId }) {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
 
-  if (!fontsLoaded) {
-    return null;
-  }
+  if (!fontsLoaded) return null;
 
   const renderContent = () => {
     switch (activeTab) {
       case "friends":
         return (
-          <FriendsList
-            friends={friends}
-            isLoading={friendsLoading}
-            onRemoveFriend={handleRemoveFriend}
-            onChat={openChat}
-          />
+          // in FriendsSection renderContent -> friends tab
+<FriendsList
+  friends={friends}
+  isLoading={friendsLoading}
+  onRemoveFriend={handleRemoveFriend}
+  onChat={openChat}
+  playerId={playerId}
+  onVisibleCountChange={(n) => {
+    // keep the badge accurate even when friends[] is empty but self-fetch returns
+    // e.g., set some local state that you pass to FriendsTabs as friendsCount
+    // setFriendsCountOverride(n);
+  }}
+/>
+
         );
       case "requests":
-        return (
-          <FriendRequests
-            requests={requests}
-            onRespond={handleRequestResponse}
-          />
-        );
+        return <FriendRequests requests={requests} onRespond={handleRequestResponse} />;
       case "search":
         return (
           <AddFriend

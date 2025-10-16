@@ -73,16 +73,24 @@ export function useGameStats(playerId, gameId) {
 /** Game-type string constants for convenience (use to look up games.id elsewhere) */
 export const GAME_STATS_TYPES = {
   CONNECT_4: "connect_4",
-  TETRIS: "tetris",
+  BLOCK_BLAST: "blockrise",
   TWENTY_FORTY_EIGHT: "2048",
   MEMORY_MATCH: "memory_match",
   SNAKE: "snake",
+    PONG: "pong",
+    STACKEM: "stackem",
+    VOIDINVADERS: "voidinvaders",
+    SMASHEM: "smashem",
+    HILO: "hilo",
   MINESWEEPER: "minesweeper",
   WORD_SEARCH: "word_search",
   SUDOKU: "sudoku",
+    CHOICES: "choices",
   SLIDING_PUZZLE: "sliding_puzzle",
-  CHESS: "chess",
+    HANGMAN: "hangman",
+    WORDTILES: "wordtiles",
   SOLITAIRE: "solitaire",
+    FILLTHEGRID: "fillthegrid",
   BLOCK_BLAST: "block_blast",
   WATER_SORT: "water_sort",
   MANCALA: "mancala",
@@ -90,8 +98,8 @@ export const GAME_STATS_TYPES = {
   SIMON_SAYS: "simon_says",
   WHACK_A_TAP: "whack_a_tap",
   DOTS_AND_BOXES: "dots_and_boxes",
-  KAKURO: "kakuro",
   WORD_WHEEL: "word_wheel",
+    TICTACTOE: "tictactoe",
 };
 
 /**
@@ -105,7 +113,6 @@ export function formatGameScore(stats, gameType) {
   switch (gameType) {
     // Games where “wins / total plays” is more meaningful
     case GAME_STATS_TYPES.CONNECT_4:
-    case GAME_STATS_TYPES.CHESS:
     case GAME_STATS_TYPES.MANCALA:
     case GAME_STATS_TYPES.DOTS_AND_BOXES:
       return {

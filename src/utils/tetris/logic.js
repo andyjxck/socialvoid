@@ -1,100 +1,48 @@
-import { PIECES, BOARD_WIDTH, BOARD_HEIGHT } from "./constants";
+// utils/blockRise/logic.js
+import { COLS, ROWS, SHAPES, COLORS } from "./constants";
 
-// Initialize empty board
-export const createEmptyBoard = () => {
-  return Array(BOARD_HEIGHT)
-    .fill(null)
-    .map(() => Array(BOARD_WIDTH).fill({ filled: false, color: null }));
+export const createEmptyBoard = () =>
+  Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+
+export const randomPiece = () => {
+  const def = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+  const rotIndex = Math.floor(Math.random() * def.rotations.length);
+  const grid = def.rotations[rotIndex];
+  const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+  const x = Math.floor((COLS - grid[0].length) / 2);
+  const y = -2;
+  return { name: def.name, grid, rotIndex, x, y, color };
 };
 
-// Get random piece type
-export const getRandomPieceType = () => {
-  const types = Object.keys(PIECES);
-  return types[Math.floor(Math.random() * types.length)];
-};
-
-// Create new piece
-export const createPiece = (type) => {
-  return {
-    type,
-    rotation: 0,
-    shape: PIECES[type].shape[0],
-    color: PIECES[type].color,
-  };
-};
-
-// Check if position is valid
-export const isValidPosition = (board, piece, pos, rotation = 0) => {
-  const shape = PIECES[piece.type].shape[rotation];
-
-  for (let row = 0; row < 4; row++) {
-    for (let col = 0; col < 4; col++) {
-      if (shape[row][col]) {
-        const newRow = pos.y + row;
-        const newCol = pos.x + col;
-
-        // Check boundaries
-        if (newCol < 0 || newCol >= BOARD_WIDTH || newRow >= BOARD_HEIGHT) {
-          return false;
-        }
-
-        // Check collision with existing pieces (but allow negative rows for spawning)
-        if (newRow >= 0 && board[newRow][newCol].filled) {
-          return false;
-        }
-      }
+export const canPlace = (board, piece, nx, ny, grid = piece.grid) => {
+  for (let r=0;r<grid.length;r++){
+    for (let c=0;c<grid[0].length;c++){
+      if (!grid[r][c]) continue;
+      const br = ny + r, bc = nx + c;
+      if (bc < 0 || bc >= COLS || br >= ROWS) return false;
+      if (br >= 0 && board[br][bc]) return false;
     }
   }
   return true;
 };
 
-// Lock piece to board
-export const lockPiece = (board, piece, pos, rotation) => {
-  const newBoard = board.map((row) => row.map((cell) => ({ ...cell })));
-  const shape = PIECES[piece.type].shape[rotation];
-
-  for (let row = 0; row < 4; row++) {
-    for (let col = 0; col < 4; col++) {
-      if (shape[row][col]) {
-        const boardRow = pos.y + row;
-        const boardCol = pos.x + col;
-
-        if (boardRow >= 0) {
-          newBoard[boardRow][boardCol] = {
-            filled: true,
-            color: piece.color,
-          };
-        }
+export const mergePiece = (board, piece) => {
+  const out = board.map(row => row.slice());
+  for (let r=0;r<piece.grid.length;r++)
+    for (let c=0;c<piece.grid[0].length;c++)
+      if (piece.grid[r][c]) {
+        const br = piece.y + r, bc = piece.x + c;
+        if (br >= 0 && br < ROWS && bc >= 0 && bc < COLS) out[br][bc] = piece.color;
       }
-    }
-  }
-
-  return newBoard;
+  return out;
 };
 
-// Clear completed lines
-export const clearLines = (board) => {
-  const newBoard = [];
-  let clearedCount = 0;
-
-  for (let row = 0; row < BOARD_HEIGHT; row++) {
-    if (board[row].every((cell) => cell.filled)) {
-      clearedCount++;
-    } else {
-      newBoard.push([...board[row]]);
-    }
+export const clearFullRows = (board) => {
+  let cleared = 0;
+  const keep = [];
+  for (let r=0;r<ROWS;r++){
+    if (board[r].every(v => v)) cleared++; else keep.push(board[r]);
   }
-
-  // Add empty rows at top
-  while (newBoard.length < BOARD_HEIGHT) {
-    newBoard.unshift(Array(BOARD_WIDTH).fill({ filled: false, color: null }));
-  }
-
-  return { board: newBoard, linesCleared: clearedCount };
-};
-
-// Calculate score
-export const calculateScore = (linesCleared, currentLevel) => {
-  const basePoints = [0, 40, 100, 300, 1200];
-  return basePoints[linesCleared] * (currentLevel + 1);
+  while (keep.length < ROWS) keep.unshift(Array(COLS).fill(0));
+  return { board: keep, cleared };
 };

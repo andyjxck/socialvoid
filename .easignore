@@ -35,4 +35,4 @@ yarn-error.*
 app-example
 
 caches/
-public/
+public/android/local.properties

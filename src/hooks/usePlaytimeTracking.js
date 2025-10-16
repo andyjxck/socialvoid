@@ -1,162 +1,169 @@
-// hooks/usePlaytimeTracking.js
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import { AppState } from "react-native";
-import { supabase } from "../utils/supabase";
+import playtimeTracker from "../utils/playtimeTracker";
 
 /**
- * Tracks "online" time (app in foreground/active) and updates
- * players.total_playtime_seconds in Supabase.
- *
- * Behavior:
- * - +1 second counted for every real second the app is ACTIVE
- * - Flushes to Supabase once per minute with the accumulated seconds
- * - Also flushes on background/inactive and on unmount with any leftover seconds
- *
- * Requirements:
- * - `players` table with `id` PK and `total_playtime_seconds` int
+ * Fixes:
+ * - No double-start: only start/resume when transitioning to 'active'
+ * - No double-end: guard end/submission so it runs once per background/cleanup
+ * - Periodic submit every 60s only when app is active
+ * - Flush offline queue on return to active
+ * - Safe cleanup order: stop timer -> end -> submit (guarded)
  */
 export function usePlaytimeTracking(playerId) {
-  const appStateRef = useRef(AppState.currentState);
-  const isActiveRef = useRef(appStateRef.current === "active");
-  const secondsSinceFlushRef = useRef(0);
-  const secondTickerRef = useRef(null);
-
-  // ---- Supabase: add seconds to players.total_playtime_seconds ----
-  const flushToSupabase = useCallback(
-    async (deltaSeconds) => {
-      const delta = Math.max(0, Math.floor(Number(deltaSeconds) || 0));
-      if (!playerId || delta <= 0) return;
-
-      try {
-        // Read current total (simple & safe for single-client updates)
-        const { data: row, error: selErr } = await supabase
-          .from("players")
-          .select("total_playtime_seconds")
-          .eq("id", playerId)
-          .maybeSingle();
-
-        if (selErr) {
-          console.warn("[usePlaytimeTracking] SELECT failed:", selErr);
-          return;
-        }
-
-        const current = Number(row?.total_playtime_seconds) || 0;
-        const next = current + delta;
-
-        const { error: updErr } = await supabase
-          .from("players")
-          .update({
-            total_playtime_seconds: next,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", playerId);
-
-        if (updErr) {
-          console.warn("[usePlaytimeTracking] UPDATE failed:", updErr);
-          return;
-        }
-
-        // Reset local counter after successful flush
-        secondsSinceFlushRef.current = 0;
-        // Optional: console.log for visibility
-        console.log(`⏱️ Flushed +${delta}s -> total_playtime_seconds=${next}`);
-      } catch (e) {
-        console.warn("[usePlaytimeTracking] Flush error:", e);
-      }
-    },
-    [playerId]
-  );
-
-  // Start ticking 1s when active; stop when not
-  const startSecondTicker = useCallback(() => {
-    if (secondTickerRef.current) return;
-    secondTickerRef.current = setInterval(() => {
-      if (!playerId) return;
-
-      if (isActiveRef.current) {
-        secondsSinceFlushRef.current += 1;
-
-        // Flush every full minute
-        if (secondsSinceFlushRef.current >= 60) {
-          const delta = secondsSinceFlushRef.current;
-          // fire & forget; no await inside interval
-          flushToSupabase(delta);
-        }
-      }
-    }, 1000);
-  }, [playerId, flushToSupabase]);
-
-  const stopSecondTicker = useCallback(() => {
-    if (secondTickerRef.current) {
-      clearInterval(secondTickerRef.current);
-      secondTickerRef.current = null;
-    }
-  }, []);
-
-  // Manually start/stop (exposed API – optional)
-  const startTracking = useCallback(() => {
-    isActiveRef.current = true;
-    startSecondTicker();
-  }, [startSecondTicker]);
-
-  const stopTracking = useCallback(async () => {
-    isActiveRef.current = false;
-    // Flush any remaining seconds immediately
-    const leftover = secondsSinceFlushRef.current;
-    if (leftover > 0) {
-      await flushToSupabase(leftover);
-    }
-    stopSecondTicker();
-  }, [flushToSupabase, stopSecondTicker]);
-
-  // Effect: wire AppState + lifecycle
   useEffect(() => {
     if (!playerId) return;
 
-    // Initialize based on current state
-    isActiveRef.current = AppState.currentState === "active";
-    if (isActiveRef.current) {
-      startSecondTicker();
-    }
+    const lastAppStateRef = useRef(AppState.currentState || "active");
+    const submittingRef = useRef(false);
+    const intervalRef = useRef(null);
+    const endedThisStateRef = useRef(false); // prevents double end on 'inactive' -> 'background' chain
+    const mountedRef = useRef(true);
 
-    const handleAppStateChange = async (next) => {
-      const wasActive = isActiveRef.current;
-      const nowActive = next === "active";
-
-      isActiveRef.current = nowActive;
-
-      // If moving to background/inactive – flush any partial seconds
-      if (wasActive && !nowActive) {
-        const leftover = secondsSinceFlushRef.current;
-        if (leftover > 0) {
-          await flushToSupabase(leftover);
-        }
+    const submitDuration = async (durationSecs) => {
+      if (!durationSecs || durationSecs <= 0) return { success: true };
+      if (submittingRef.current) {
+        // Avoid overlapping submissions
+        return { success: false, reason: "busy" };
       }
-
-      // Manage the second ticker
-      if (nowActive) {
-        startSecondTicker();
-      } else {
-        // we keep ticker running to keep 1s cadence consistent,
-        // but you can stop it if you prefer to be extra conservative:
-        // stopSecondTicker();
+      submittingRef.current = true;
+      try {
+        const result = await playtimeTracker.submitSessionWithAchievements(
+          playerId,
+          durationSecs
+        );
+        if (!result?.success) {
+          await playtimeTracker.storeOfflineSession(playerId, durationSecs);
+        }
+        return result || { success: false };
+      } catch (err) {
+        console.error("📱 submitDuration failed:", err);
+        try {
+          await playtimeTracker.storeOfflineSession(playerId, durationSecs);
+        } catch (e2) {
+          console.error("📱 storeOfflineSession failed:", e2);
+        }
+        return { success: false, error: err };
+      } finally {
+        submittingRef.current = false;
       }
     };
+
+    const startActiveLoop = () => {
+      if (intervalRef.current) return; // already running
+      intervalRef.current = setInterval(async () => {
+        try {
+          // Only act if still active
+          if (!mountedRef.current || AppState.currentState !== "active") return;
+
+          const currentDuration = playtimeTracker.getCurrentSessionDuration?.();
+          if (typeof currentDuration === "number" && currentDuration >= 60) {
+            // Close and submit the current 60s chunk
+            const chunk = playtimeTracker.endSession?.();
+            if (chunk && chunk > 0) {
+              const res = await submitDuration(chunk);
+              if (res?.success) {
+                console.log("📱 Periodic session submitted:", chunk + "s");
+              }
+            }
+            // Immediately start the next chunk
+            playtimeTracker.startSession?.();
+          }
+        } catch (e) {
+          console.error("📱 periodic loop error:", e);
+        }
+      }, 60_000);
+    };
+
+    const stopActiveLoop = () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+
+    const onBecameActive = async () => {
+      endedThisStateRef.current = false;
+      try {
+        // Resume or start; flush anything queued while offline
+        playtimeTracker.startSession?.();
+        playtimeTracker.resumeSession?.();
+        await playtimeTracker.submitOfflineSessions?.();
+      } catch (e) {
+        console.error("📱 active/resume error:", e);
+      }
+      startActiveLoop();
+    };
+
+    const endAndSubmitOnce = async (reason = "background") => {
+      if (endedThisStateRef.current) return;
+      endedThisStateRef.current = true;
+      try {
+        playtimeTracker.pauseSession?.();
+        const sessionDuration = playtimeTracker.endSession?.();
+        if (sessionDuration && sessionDuration > 0) {
+          const res = await submitDuration(sessionDuration);
+          if (!res?.success) {
+            await playtimeTracker.storeOfflineSession?.(
+              playerId,
+              sessionDuration
+            );
+          }
+          console.log(
+            `📱 Session submitted on ${reason}:`,
+            sessionDuration + "s"
+          );
+        }
+      } catch (e) {
+        console.error(`📱 endAndSubmitOnce(${reason}) failed:`, e);
+        try {
+          // If endSession threw after measuring time, attempt to store a minimal offline chunk
+          const fallback = playtimeTracker.getCurrentSessionDuration?.();
+          if (fallback && fallback > 0) {
+            await playtimeTracker.storeOfflineSession?.(playerId, fallback);
+          }
+        } catch (e2) {
+          console.error("📱 fallback storeOfflineSession failed:", e2);
+        }
+      }
+    };
+
+    const handleAppStateChange = async (nextState) => {
+      // iOS often goes 'active' -> 'inactive' -> 'background'
+      if (nextState === "active" && lastAppStateRef.current !== "active") {
+        await onBecameActive();
+      } else if (
+        nextState === "inactive" ||
+        nextState === "background"
+      ) {
+        // Stop periodic loop immediately so it doesn't race with our end/submit
+        stopActiveLoop();
+        await endAndSubmitOnce(nextState);
+      }
+      lastAppStateRef.current = nextState;
+    };
+
+    // INITIALIZE
+    // Align to current state at mount
+    if (AppState.currentState === "active") {
+      onBecameActive();
+    } else {
+      // Not active at mount: ensure no stray loop is running
+      stopActiveLoop();
+    }
 
     const subscription = AppState.addEventListener("change", handleAppStateChange);
 
+    // CLEANUP
     return () => {
-      subscription?.remove();
-      // Flush any remaining seconds on unmount
-      (async () => {
-        const leftover = secondsSinceFlushRef.current;
-        if (leftover > 0) {
-          await flushToSupabase(leftover);
-        }
-        stopSecondTicker();
-      })();
+      mountedRef.current = false;
+      subscription?.remove?.();
+      // Ensure loop is stopped before final end/submit
+      stopActiveLoop();
+      // Final guarded submission on unmount
+      endAndSubmitOnce("unmount").catch((e) =>
+        console.error("📱 cleanup submit failed:", e)
+      );
     };
-  }, [playerId, flushToSupabase, startSecondTicker, stopSecondTicker]);
-
-  return { startTracking, stopTracking };
+  }, [playerId]);
 }

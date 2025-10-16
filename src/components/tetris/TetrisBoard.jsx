@@ -1,50 +1,66 @@
+// components/tetris/TetrisBoard.jsx  (REPLACE ENTIRE FILE)
 import React from "react";
 import { View } from "react-native";
 import { useTheme } from "../../utils/theme";
-import {
-  BOARD_WIDTH,
-  BOARD_HEIGHT,
-  CELL_SIZE,
-} from "../../utils/tetris/constants";
 
-export default function TetrisBoard({ boardData }) {
+/**
+ * Props:
+ * - boardData: array[rows][cols] of 0 | string(color) | { filled:boolean, color?:string }
+ * - cellSize: number (px) — REQUIRED: exact pixel size of each cell
+ * - skipTopRows: number — how many spawn rows to hide visually (default 2)
+ */
+export default function TetrisBoard({ boardData = [], cellSize, skipTopRows = 2 }) {
   const { colors } = useTheme();
 
-  // Skip the top 2 rows (indices 0 and 1) and show rows 2-19
-  const visibleBoardData = boardData.slice(2);
+  if (!Array.isArray(boardData) || !boardData.length || !cellSize) {
+    return <View />;
+  }
+
+  const rows = boardData.length;
+  const cols = boardData[0].length || 0;
+
+  // Hide spawn rows visually
+  const startRow = Math.min(skipTopRows, Math.max(0, rows - 1));
+  const visibleBoard = boardData.slice(startRow);
+  const visibleRows = visibleBoard.length;
+
+  const boardWidth = cols * cellSize;
+  const boardHeight = visibleRows * cellSize;
+
+  const getCellColor = (cell) => {
+    if (cell && typeof cell === "object") {
+      return cell.filled ? (cell.color || null) : null;
+    }
+    return cell ? cell : null;
+  };
 
   return (
     <View
       style={{
-        width: BOARD_WIDTH * CELL_SIZE,
-        height: (BOARD_HEIGHT - 2) * CELL_SIZE, // Reduced height by 2 rows
+        width: boardWidth,
+        height: boardHeight,
         backgroundColor: colors.glassSecondary,
         borderRadius: 12,
         padding: 2,
-        alignSelf: "center",
-        marginBottom: 20,
       }}
     >
-      {visibleBoardData.map((row, rowIndex) => (
-        <View
-          key={rowIndex + 2} // Adjust key to reflect actual row index
-          style={{
-            flexDirection: "row",
-            height: CELL_SIZE,
-          }}
-        >
-          {row.map((cell, colIndex) => (
-            <View
-              key={`${rowIndex + 2}-${colIndex}`}
-              style={{
-                width: CELL_SIZE,
-                height: CELL_SIZE,
-                backgroundColor: cell.filled ? cell.color : colors.border,
-                borderWidth: 0.5,
-                borderColor: colors.overlay,
-              }}
-            />
-          ))}
+      {visibleBoard.map((row, r) => (
+        <View key={r} style={{ flexDirection: "row", height: cellSize }}>
+          {row.map((cell, c) => {
+            const color = getCellColor(cell);
+            return (
+              <View
+                key={`${r}-${c}`}
+                style={{
+                  width: cellSize,
+                  height: cellSize,
+                  backgroundColor: color || colors.border,
+                  borderWidth: 0.5,
+                  borderColor: colors.overlay,
+                }}
+              />
+            );
+          })}
         </View>
       ))}
     </View>

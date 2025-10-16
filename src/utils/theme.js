@@ -86,7 +86,7 @@ export const useTheme = () => {
     },
     dark: {
       // Much darker base colors
-      background: "rgba(2, 6, 23, 0.98)", // Almost black night sky
+      background: "rgba(2, 6, 23, 0.18)", // Almost black night sky
       surface: "rgba(15, 23, 42, 0.85)",
       surfaceSecondary: "rgba(30, 41, 59, 0.9)",
       surfaceElevated: "rgba(15, 23, 42, 0.95)",
@@ -182,7 +182,6 @@ export const getGameCategory = (gameType) => {
     sliding_puzzle: "puzzle",
     minesweeper: "puzzle",
 
-    chess: "board",
     mancala: "board",
 
     memory_match: "memory",
@@ -219,7 +218,6 @@ export const createGlassStyle = (
     borderColor: `${categoryColors.primary}20`,
     shadowColor: categoryColors.primary,
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3,
     shadowRadius: 16,
     elevation: 12,
   };

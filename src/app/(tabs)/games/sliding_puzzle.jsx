@@ -1,6 +1,6 @@
-// src/app/(tabs)/games/sliding-puzzle.jsx
+// src/app/(tabs)/games/sliding-puzzle.jsx  (REPLACE ENTIRE FILE)
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "../../../utils/theme";
@@ -12,6 +12,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 
 import {
   useFonts,
@@ -33,6 +34,7 @@ export default function SlidingPuzzleGame() {
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
   const submittedRef = useRef(false); // guard against double submit
+  const [showAchievements, setShowAchievements] = useState(false);
 
   useEffect(() => {
     const loadPlayerId = async () => {
@@ -212,10 +214,7 @@ export default function SlidingPuzzleGame() {
   const submitPersistent = useCallback(
     (opts = {}) => {
       if (!gameId || submittedRef.current) return;
-      const {
-        completed = false,
-        reason = "play",
-      } = opts;
+      const { completed = false, reason = "play" } = opts;
 
       const currentMoves = movesRef.current;
       const currentTime = timerRef.current;
@@ -248,7 +247,7 @@ export default function SlidingPuzzleGame() {
   // Initialize (stable) + mount once
   // ──────────────────────────────────
   const initializeGame = useCallback((reason = "restart") => {
-    // If a run was going and not submitted yet, count it as a play (no best_time)
+    // If a run was going and not submitted yet, count as a play (no best_time)
     if (!gameWonRef.current && (movesRef.current > 0 || timerRef.current > 0)) {
       submittedRef.current = false; // allow submit
       submitPersistent({ completed: false, reason });
@@ -370,19 +369,27 @@ export default function SlidingPuzzleGame() {
               color: colors.text,
             }}
           >
-            15 Puzzle
+            Sliding Puzzle
           </Text>
 
-          <TouchableOpacity
-            onPress={() => initializeGame("restart")}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <Shuffle size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <TouchableOpacity
+              onPress={() => setShowAchievements(true)}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => initializeGame("restart")}
+              style={{
+                padding: 8,
+                borderRadius: 12,
+                backgroundColor: colors.glassSecondary,
+              }}
+            >
+              <Shuffle size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Game stats */}
@@ -646,6 +653,66 @@ export default function SlidingPuzzleGame() {
           </View>
         </View>
       )}
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: isDark ? "rgba(0,0,0,0.9)" : colors.background,
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.border,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: colors.text }}>
+                Sliding Puzzle Achievements
+              </Text>
+              <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                <Text style={{ fontWeight: "600", fontSize: 14, color: colors.textSecondary }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {currentPlayerId && gameId ? (
+                <AchievementsSection
+                  playerId={currentPlayerId}
+                  gameId={gameId}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: colors.textSecondary, textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

@@ -1,4 +1,4 @@
-// src/app/(tabs)/games/block_blast.jsx
+// src/app/(tabs)/games/block_blast.jsx  (REPLACE ENTIRE FILE)
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
@@ -8,11 +8,11 @@ import {
   PanResponder,
   Animated,
   BackHandler,
+  Modal,
+  ScrollView,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
-import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
 import { ArrowLeft, RotateCcw, Trophy } from "lucide-react-native";
@@ -21,6 +21,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 import {
   useFonts,
   Inter_400Regular,
@@ -28,13 +29,13 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
+import { useFocusEffect } from "@react-navigation/native";
 
 const { width: screenWidth } = Dimensions.get("window");
 const BOARD_SIZE = 8;
 const BOARD_CELL_SIZE = (screenWidth - 60) / BOARD_SIZE;
 const PIECE_CELL_SIZE = 25;
 
-// Tetris-like pieces
 const PIECE_SHAPES = [
   [[1]], [[1, 1]], [[1],[1]], [[1,1,1]], [[1],[1],[1]],
   [[1,0],[1,1]], [[0,1],[1,1]], [[1,1],[1,0]], [[1,1],[0,1]],
@@ -46,51 +47,17 @@ const PIECE_SHAPES = [
 
 export default function BlockBlastGame() {
   const insets = useSafeAreaInsets();
-  const { colors, isDark } = useTheme();
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
-  const [gameId, setGameId] = useState(null);
 
-  /* ── Load player ID ─────────────────────────────────────── */
-  useEffect(() => {
-    (async () => {
-      try {
-        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
-        setCurrentPlayerId(saved ? parseInt(saved) : 1);
-      } catch {
-        setCurrentPlayerId(1);
-      }
-    })();
-  }, []);
+  // session management
+  const gameIdRef = useRef(null);
+  const scoreRef = useRef(0);
+  const focusedRef = useRef(false);
 
-  /* ── Start / end persistent tracking ────────────────────── */
-  useEffect(() => {
-    if (!currentPlayerId) return;
-    let active = true;
+  // achievements modal
+  const [showAchievements, setShowAchievements] = useState(false);
 
-    const startSession = async () => {
-      const id = await getGameId(GAME_TYPES.BLOCK_BLAST);
-      if (active && id) {
-        setGameId(id);
-        await gameTracker.startGame(id, currentPlayerId);
-        console.log("🎮 Block Blast session started:", id);
-      }
-    };
-    startSession();
-
-    // handle Android/iOS hardware back
-    const backSub = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (gameId) gameTracker.endGame(gameId, score);
-      router.back();
-      return true;
-    });
-
-    return () => {
-      active = false;
-      backSub.remove();
-      if (gameId) gameTracker.endGame(gameId, score);
-    };
-  }, [currentPlayerId, gameId]);
-
+  // fonts
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -98,7 +65,7 @@ export default function BlockBlastGame() {
     Inter_700Bold,
   });
 
-  /* ── Game state ─────────────────────────────────────────── */
+  // game state
   const [board, setBoard] = useState([]);
   const [score, setScore] = useState(0);
   const [availablePieces, setAvailablePieces] = useState([]);
@@ -108,7 +75,35 @@ export default function BlockBlastGame() {
   const [boardRef, setBoardRef] = useState(null);
   const [hoverPosition, setHoverPosition] = useState(null);
 
-  /* Helpers ------------------------------------------------- */
+  // per-run signals to feed achievements
+  const totalLinesClearedRef = useRef(0);
+  const maxLinesSingleClearRef = useRef(0);
+  const peakScoreRef = useRef(0);
+
+  // keep scoreRef in sync
+  useEffect(() => {
+    scoreRef.current = score;
+    if (score > peakScoreRef.current) {
+      peakScoreRef.current = score;
+      if (gameIdRef.current) {
+        gameTracker.updateGameData(gameIdRef.current, { peak_score: peakScoreRef.current });
+      }
+    }
+  }, [score]);
+
+  // load player id
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setCurrentPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch {
+        setCurrentPlayerId(1);
+      }
+    })();
+  }, []);
+
+  // helpers
   const createEmptyBoard = () =>
     Array(BOARD_SIZE).fill(null).map(() => Array(BOARD_SIZE).fill(0));
 
@@ -177,7 +172,7 @@ export default function BlockBlastGame() {
       b.some((row,r) => row.some((_,c) => canPlacePiece(b,p,r,c)))
     );
 
-  /* Initialize / restart game ------------------------------ */
+  // init/reset game state
   const initializeGame = useCallback(() => {
     setBoard(createPreFilledBoard());
     setAvailablePieces(generateNewPieces());
@@ -185,9 +180,56 @@ export default function BlockBlastGame() {
     setGameOver(false);
     setDraggedPiece(null);
     setHoverPosition(null);
+    dragPosition.setValue({ x: 0, y: 0 });
+
+    // reset per-run signals
+    totalLinesClearedRef.current = 0;
+    maxLinesSingleClearRef.current = 0;
+    peakScoreRef.current = 0;
+  }, [dragPosition]);
+
+  // session control
+  const startSession = useCallback(async () => {
+    if (!currentPlayerId || focusedRef.current) return;
+    const id = await getGameId(GAME_TYPES.BLOCK_BLAST);
+    gameIdRef.current = id;
+    focusedRef.current = true;
+    if (id) await gameTracker.startGame(id, currentPlayerId);
+  }, [currentPlayerId]);
+
+  const endSession = useCallback(async () => {
+    if (!gameIdRef.current) return;
+    try {
+      // push last-known signals before ending (in case the last placement didn’t write)
+      gameTracker.updateGameData(gameIdRef.current, {
+        total_lines_cleared: totalLinesClearedRef.current,
+        max_lines_single_clear: maxLinesSingleClearRef.current,
+        peak_score: peakScoreRef.current,
+      });
+      await gameTracker.endGame(gameIdRef.current, scoreRef.current || 0);
+    } catch {}
+    gameIdRef.current = null;
+    focusedRef.current = false;
   }, []);
 
-  /* Piece placement --------------------------------------- */
+  // focus/blur lifecycle: start fresh on focus, end on blur
+  useFocusEffect(
+    useCallback(() => {
+      initializeGame();
+      startSession();
+      const backSub = BackHandler.addEventListener("hardwareBackPress", () => {
+        endSession();
+        router.back();
+        return true;
+      });
+      return () => {
+        backSub.remove();
+        endSession();
+      };
+    }, [initializeGame, startSession, endSession])
+  );
+
+  // game logic: placing pieces
   const handlePiecePlacement = (piece, { row, col }) => {
     if (!canPlacePiece(board, piece, row, col)) return false;
     let nb = placePiece(board, piece, row, col);
@@ -204,19 +246,35 @@ export default function BlockBlastGame() {
     setScore(newScore);
     setAvailablePieces(nextPieces);
 
+    // ⬇️ Update per-run signals + push to session gameData for achievements
+    if (clearedLines > 0) {
+      totalLinesClearedRef.current += clearedLines;
+      if (clearedLines > maxLinesSingleClearRef.current) {
+        maxLinesSingleClearRef.current = clearedLines;
+      }
+    }
+    if (gameIdRef.current) {
+      gameTracker.updateGameData(gameIdRef.current, {
+        total_lines_cleared: totalLinesClearedRef.current,
+        max_lines_single_clear: maxLinesSingleClearRef.current,
+        peak_score: Math.max(peakScoreRef.current, newScore),
+      });
+    }
+
     if (!canPlaceAnyPiece(cleared, nextPieces)) {
       setGameOver(true);
-      if (gameId) gameTracker.endGame(gameId, newScore);   // ✅ high-score submit
+      endSession(); // submit final score and close session (checkAchievements runs on end)
     }
 
     if (clearedLines > 0)
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     else
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
     return true;
   };
 
-  /* Drag handling ----------------------------------------- */
+  // dragging
   const createPanResponder = (piece) =>
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -260,48 +318,58 @@ export default function BlockBlastGame() {
       },
     });
 
-  /* Initial board & pieces -------------------------------- */
-  useEffect(() => { initializeGame(); }, [initializeGame]);
   if (!fontsLoaded) return null;
 
-  /* UI ---------------------------------------------------- */
   return (
     <View style={{ flex:1 }}>
-      <StatusBar style={isDark ? "light" : "dark"} />
+      <StatusBar style="light" />
       <NightSkyBackground />
 
       {/* Header */}
       <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, marginBottom: 20 }}>
         <View style={{ flexDirection:"row", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
           <TouchableOpacity
-            onPress={() => { if (gameId) gameTracker.endGame(gameId, score); router.back(); }}
-            style={{ padding:8, borderRadius:12, backgroundColor: colors.glassSecondary }}
+            onPress={() => { endSession(); router.back(); }}
+            style={{ padding:8, borderRadius:12, backgroundColor: "rgba(255,255,255,0.08)" }}
           >
-            <ArrowLeft size={24} color={colors.text} />
+            <ArrowLeft size={24} color="#fff" />
           </TouchableOpacity>
 
-          <Text style={{ fontFamily:"Inter_700Bold", fontSize:20, color: colors.text }}>Block Blast</Text>
+          <Text style={{ fontFamily:"Inter_700Bold", fontSize:20, color:"#fff" }}>Block Place</Text>
 
-          <TouchableOpacity
-            onPress={initializeGame}
-            style={{ padding:8, borderRadius:12, backgroundColor: colors.glassSecondary }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            {/* Achievements button */}
+            <TouchableOpacity
+              onPress={() => {
+                setShowAchievements(true);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+              }}
+              style={{ padding:8, borderRadius:12, backgroundColor: "rgba(255,255,255,0.08)" }}
+            >
+              <Trophy size={22} color="#fff" />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => { endSession(); initializeGame(); startSession(); }}
+              style={{ padding:8, borderRadius:12, backgroundColor: "rgba(255,255,255,0.08)" }}
+            >
+              <RotateCcw size={24} color="#fff" />
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* Score Display */}
-        <BlurView intensity={isDark ? 60 : 80} tint={isDark ? "dark" : "light"}
+        {/* Score */}
+        <BlurView intensity={80} tint="dark"
           style={{
-            backgroundColor: isDark ? "rgba(31,41,55,0.7)" : "rgba(255,255,255,0.7)",
-            borderWidth:1, borderColor:colors.border, borderRadius:16, padding:16
+            backgroundColor: "rgba(0,0,0,0.35)",
+            borderWidth:1, borderColor:"rgba(255,255,255,0.12)", borderRadius:16, padding:16
           }}>
           <View style={{ alignItems:"center" }}>
-            <Text style={{ fontFamily:"Inter_500Medium", fontSize:12, color:colors.textSecondary,
+            <Text style={{ fontFamily:"Inter_500Medium", fontSize:12, color:"rgba(255,255,255,0.8)",
                            textTransform:"uppercase", letterSpacing:0.5, marginBottom:4 }}>
               Score
             </Text>
-            <Text style={{ fontFamily:"Inter_700Bold", fontSize:24, color: colors.gameAccent1 }}>
+            <Text style={{ fontFamily:"Inter_700Bold", fontSize:24, color:"#9AE6B4" }}>
               {score.toLocaleString()}
             </Text>
           </View>
@@ -315,7 +383,7 @@ export default function BlockBlastGame() {
           style={{
             width: BOARD_SIZE * BOARD_CELL_SIZE,
             height: BOARD_SIZE * BOARD_CELL_SIZE,
-            backgroundColor: colors.glassSecondary,
+            backgroundColor: "rgba(255,255,255,0.08)",
             borderRadius: 12,
             padding: 4,
             alignSelf: "center",
@@ -338,12 +406,12 @@ export default function BlockBlastGame() {
                 return (
                   <View key={ci} style={{
                     flex:1,
-                    backgroundColor: highlight ? hlColor : cell || colors.border,
+                    backgroundColor: highlight ? hlColor : cell || "rgba(255,255,255,0.12)",
                     justifyContent:"center", alignItems:"center",
                     borderWidth: highlight ? 2 : 0.5,
                     borderColor: highlight
                       ? (hoverPosition?.canPlace ? draggedPiece?.color : "#FF4444")
-                      : colors.overlay,
+                      : "rgba(255,255,255,0.15)",
                     margin:1, borderRadius:2
                   }}/>
                 );
@@ -367,12 +435,12 @@ export default function BlockBlastGame() {
                 transform: draggedPiece?.id === piece.id
                   ? [{ translateX: dragPosition.x },{ translateY: dragPosition.y }]
                   : [],
-                opacity: draggedPiece?.id === piece.id ? 0.8 : 1,
+                opacity: draggedPiece?.id === piece.id ? 0.4 : 1,
                 padding:12,
-                backgroundColor: colors.glassSecondary,
+                backgroundColor: "rgba(255,255,255,0.08)",
                 borderRadius:12,
                 borderWidth:2,
-                borderColor: colors.border
+                borderColor: "rgba(255,255,255,0.15)"
               }}
               {...createPanResponder(piece).panHandlers}
             >
@@ -393,46 +461,46 @@ export default function BlockBlastGame() {
           ))}
         </View>
 
-        {/* Game Over Overlay */}
+        {/* Game Over */}
         {gameOver && (
           <View style={{
             position:"absolute", top:0, left:0, right:0, bottom:0,
             backgroundColor:"rgba(0,0,0,0.7)",
             justifyContent:"center", alignItems:"center"
           }}>
-            <BlurView intensity={isDark ? 80 : 100} tint={isDark ? "dark" : "light"}
+            <BlurView intensity={100} tint="dark"
               style={{
-                backgroundColor: isDark ? "rgba(31,41,55,0.9)" : "rgba(255,255,255,0.9)",
-                borderWidth:1, borderColor:colors.border,
+                backgroundColor: "rgba(0,0,0,0.85)",
+                borderWidth:1, borderColor:"rgba(255,255,255,0.15)",
                 borderRadius:20, padding:32, alignItems:"center", margin:20
               }}>
-              <Trophy size={48} color={colors.gameAccent1} style={{ marginBottom:16 }} />
-              <Text style={{ fontFamily:"Inter_700Bold", fontSize:24, color: colors.text, marginBottom:8 }}>
+              <Trophy size={48} color="#9AE6B4" style={{ marginBottom:16 }} />
+              <Text style={{ fontFamily:"Inter_700Bold", fontSize:24, color:"#fff", marginBottom:8 }}>
                 Game Over
               </Text>
-              <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:18, color: colors.gameAccent1, marginBottom:20 }}>
+              <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:18, color:"#9AE6B4", marginBottom:20 }}>
                 Score: {score.toLocaleString()}
               </Text>
 
-              <View style={{ flexDirection:"row", gap:12 }}>
+              <View style={{ flexDirection:"row" }}>
                 <TouchableOpacity
-                  onPress={initializeGame}
+                  onPress={() => { endSession(); initializeGame(); startSession(); }}
                   style={{
-                    backgroundColor: colors.secondaryButton,
-                    paddingHorizontal:20, paddingVertical:12, borderRadius:12
+                    backgroundColor: "rgba(255,255,255,0.12)",
+                    paddingHorizontal:20, paddingVertical:12, borderRadius:12, marginRight:12
                   }}>
-                  <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:14, color: colors.secondaryButtonText }}>
+                  <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:14, color:"#fff" }}>
                     Play Again
                   </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  onPress={() => { if (gameId) gameTracker.endGame(gameId, score); router.back(); }}
+                  onPress={() => { endSession(); router.back(); }}
                   style={{
-                    backgroundColor: colors.primaryButton,
+                    backgroundColor: "#6366F1",
                     paddingHorizontal:20, paddingVertical:12, borderRadius:12
                   }}>
-                  <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:14, color: colors.primaryButtonText }}>
+                  <Text style={{ fontFamily:"Inter_600SemiBold", fontSize:14, color:"#fff" }}>
                     Back to Hub
                   </Text>
                 </TouchableOpacity>
@@ -441,6 +509,72 @@ export default function BlockBlastGame() {
           </View>
         )}
       </View>
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }}>
+          <View style={{ marginTop: insets.top + 12, marginBottom: insets.bottom + 12, flex: 1, paddingHorizontal: 16 }}>
+            <BlurView
+              intensity={90}
+              tint="dark"
+              style={{
+                flex: 1,
+                borderRadius: 16,
+                overflow: "hidden",
+                borderWidth: 1,
+                borderColor: "rgba(255,255,255,0.12)",
+                backgroundColor: "rgba(0,0,0,0.85)",
+              }}
+            >
+              {/* Header row */}
+              <View
+                style={{
+                  paddingHorizontal: 16,
+                  paddingVertical: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: "rgba(255,255,255,0.12)",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: "#fff" }}>
+                  Block Place Achievements
+                </Text>
+                <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                  <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 14, color: "rgba(255,255,255,0.7)" }}>
+                    Close
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Content */}
+              <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
+                {currentPlayerId && gameIdRef.current ? (
+                  <AchievementsSection
+                    playerId={currentPlayerId}
+                    gameId={gameIdRef.current}
+                    autoRefreshMs={15000}
+                    showSearchBar={true}
+                    showFilters={true}
+                  />
+                ) : (
+                  <View style={{ padding: 16 }}>
+                    <Text style={{ color: "rgba(255,255,255,0.8)", fontFamily: "Inter_500Medium", textAlign: "center" }}>
+                      Loading achievements…
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
+            </BlurView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

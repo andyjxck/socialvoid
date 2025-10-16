@@ -1,3 +1,4 @@
+// src/app/(tabs)/games/memory-match.jsx  (REPLACE ENTIRE FILE)
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
@@ -6,10 +7,11 @@ import {
   Pressable,
   Alert,
   Dimensions,
+  Modal,
+  ScrollView,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
@@ -26,6 +28,7 @@ import {
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 
 const { width: screenWidth } = Dimensions.get("window");
 const BEST_TIME_KEY = "memory_match_best_time";
@@ -39,6 +42,9 @@ export default function MemoryMatchGame() {
   const [gameTypeId, setGameTypeId] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const submittedRef = useRef(false);
+
+  // Achievements UI
+  const [showAchievements, setShowAchievements] = useState(false);
 
   // Get player id
   useEffect(() => {
@@ -68,7 +74,7 @@ export default function MemoryMatchGame() {
         }
         setGameTypeId(id);
         const started = await gameTracker.startGame(id, currentPlayerId);
-        localSessionId = started ?? id; // in case your tracker returns a run id
+        localSessionId = started ?? id; // if your tracker returns a separate run id
         setSessionId(localSessionId);
         submittedRef.current = false;
       } catch (e) {
@@ -116,24 +122,8 @@ export default function MemoryMatchGame() {
   const cardSize = (screenWidth - 80) / gridSize - 8;
 
   const symbols = [
-    "🌟",
-    "🎯",
-    "🎨",
-    "🎵",
-    "🚀",
-    "🎪",
-    "🎭",
-    "🎲",
-    "🎮",
-    "🏆",
-    "💎",
-    "🔥",
-    "⚡",
-    "🌈",
-    "🎊",
-    "🎈",
-    "🎁",
-    "🏅",
+    "🌟","🎯","🎨","🎵","🚀","🎪","🎭","🎲","🎮",
+    "🏆","💎","🔥","⚡","🌈","🎊","🎈","🎁","🏅",
   ];
 
   // load best time
@@ -195,11 +185,7 @@ export default function MemoryMatchGame() {
 
   // complete?
   useEffect(() => {
-    if (
-      cards.length > 0 &&
-      matchedCards.length > 0 &&
-      matchedCards.length === cards.length
-    ) {
+    if (cards.length > 0 && matchedCards.length > 0 && matchedCards.length === cards.length) {
       setGameCompleted(true);
       setIsPlaying(false);
 
@@ -230,12 +216,7 @@ export default function MemoryMatchGame() {
         }`,
         [
           { text: "Play Again", onPress: initializeGame },
-          {
-            text: "Back to Hub",
-            onPress: () => {
-              router.back();
-            },
-          },
+          { text: "Back to Hub", onPress: () => router.back() },
         ]
       );
     }
@@ -258,31 +239,23 @@ export default function MemoryMatchGame() {
       return;
     }
 
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    } catch {}
+    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
 
     // flip the tapped card
-    setCards((prev) =>
-      prev.map((c) => (c.id === cardId ? { ...c, isFlipped: true } : c))
-    );
+    setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, isFlipped: true } : c)));
     const newerFlipped = [...flippedCards, cardId];
     setFlippedCards(newerFlipped);
 
     if (newerFlipped.length === 2) {
       setMoves((m) => m + 1);
-      // find symbols from current cards list (safe enough here)
+      // find symbols from current cards list
       const [aId, bId] = newerFlipped;
       const a = cards.find((c) => c.id === aId);
       const b = cards.find((c) => c.id === bId);
 
       setTimeout(() => {
         if (a && b && a.symbol === b.symbol) {
-          try {
-            Haptics.notificationAsync(
-              Haptics.NotificationFeedbackType.Success
-            );
-          } catch {}
+          try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
           setMatchedCards((prev) => [...prev, aId, bId]);
           setCards((prev) =>
             prev.map((c) =>
@@ -290,9 +263,7 @@ export default function MemoryMatchGame() {
             )
           );
         } else {
-          try {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          } catch {}
+          try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
           setCards((prev) =>
             prev.map((c) =>
               c.id === aId || c.id === bId ? { ...c, isFlipped: false } : c
@@ -311,9 +282,7 @@ export default function MemoryMatchGame() {
   };
 
   const togglePause = async () => {
-    try {
-      await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    } catch {}
+    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
     setIsPlaying((p) => !p);
   };
 
@@ -342,13 +311,9 @@ export default function MemoryMatchGame() {
         >
           <TouchableOpacity
             onPress={() => {
-              // Back: cancel session if not submitted
               if (sessionId && !submittedRef.current) {
                 try {
-                  gameTracker.endGame(sessionId, 0, {
-                    cancelled: true,
-                    reason: "back",
-                  });
+                  gameTracker.endGame(sessionId, 0, { cancelled: true, reason: "back" });
                 } catch {}
               }
               router.back();
@@ -362,26 +327,25 @@ export default function MemoryMatchGame() {
             <ArrowLeft size={24} color={colors.text} />
           </TouchableOpacity>
 
-          <Text
-            style={{
-              fontFamily: "Inter_700Bold",
-              fontSize: 20,
-              color: colors.text,
-            }}
-          >
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: colors.text }}>
             Memory Match
           </Text>
 
-          <TouchableOpacity
-            onPress={initializeGame}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <TouchableOpacity
+              onPress={() => setShowAchievements(true)}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={initializeGame}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <RotateCcw size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Stats row */}
@@ -390,90 +354,40 @@ export default function MemoryMatchGame() {
             intensity={isDark ? 60 : 80}
             tint={isDark ? "dark" : "light"}
             style={{
-              backgroundColor: isDark
-                ? "rgba(31, 41, 55, 0.7)"
-                : "rgba(255, 255, 255, 0.7)",
+              backgroundColor: isDark ? "rgba(31, 41, 55, 0.7)" : "rgba(255, 255, 255, 0.7)",
               borderWidth: 1,
               borderColor: colors.border,
               borderRadius: 16,
               padding: 16,
             }}
           >
-            <View
-              style={{
-                flexDirection: "row",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Moves
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.text,
-                  }}
-                >
+                <Text style={{
+                  fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary,
+                  textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4,
+                }}>Moves</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.text }}>
                   {moves}
                 </Text>
               </View>
 
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Time
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.text,
-                  }}
-                >
+                <Text style={{
+                  fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary,
+                  textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4,
+                }}>Time</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.text }}>
                   {formatTime(timer)}
                 </Text>
               </View>
 
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Best
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent1,
-                  }}
-                >
+                <Text style={{
+                  fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary,
+                  textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4,
+                }}>Best</Text>
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent1 }}>
                   {bestTime != null ? formatTime(bestTime) : "—"}
                 </Text>
               </View>
@@ -481,11 +395,7 @@ export default function MemoryMatchGame() {
               {gameStarted && !gameCompleted && (
                 <TouchableOpacity
                   onPress={togglePause}
-                  style={{
-                    padding: 8,
-                    borderRadius: 12,
-                    backgroundColor: colors.gameAccent1 + "20",
-                  }}
+                  style={{ padding: 8, borderRadius: 12, backgroundColor: colors.gameAccent1 + "20" }}
                 >
                   {isPlaying ? (
                     <Pause size={20} color={colors.gameAccent1} />
@@ -547,17 +457,13 @@ export default function MemoryMatchGame() {
                     ? "rgba(31, 41, 55, 0.7)"
                     : "rgba(255, 255, 255, 0.7)",
                   borderWidth: 1,
-                  borderColor: card.isMatched
-                    ? colors.gameAccent1
-                    : colors.border,
+                  borderColor: card.isMatched ? colors.gameAccent1 : colors.border,
                   justifyContent: "center",
                   alignItems: "center",
                 }}
               >
                 {card.isFlipped || card.isMatched ? (
-                  <Text style={{ fontSize: cardSize * 0.4 }}>
-                    {card.symbol}
-                  </Text>
+                  <Text style={{ fontSize: cardSize * 0.4 }}>{card.symbol}</Text>
                 ) : (
                   <View
                     style={{
@@ -584,21 +490,12 @@ export default function MemoryMatchGame() {
               alignItems: "center",
             }}
           >
-            <View
-              style={{
-                borderRadius: 20,
-                overflow: "hidden",
-                paddingHorizontal: 32,
-                paddingVertical: 24,
-              }}
-            >
+            <View style={{ borderRadius: 20, overflow: "hidden", paddingHorizontal: 32, paddingVertical: 24 }}>
               <BlurView
                 intensity={isDark ? 80 : 100}
                 tint={isDark ? "dark" : "light"}
                 style={{
-                  backgroundColor: isDark
-                    ? "rgba(31, 41, 55, 0.9)"
-                    : "rgba(255, 255, 255, 0.9)",
+                  backgroundColor: isDark ? "rgba(31, 41, 55, 0.9)" : "rgba(255, 255, 255, 0.9)",
                   borderWidth: 1,
                   borderColor: colors.border,
                   borderRadius: 20,
@@ -606,30 +503,11 @@ export default function MemoryMatchGame() {
                   alignItems: "center",
                 }}
               >
-                <Trophy
-                  size={48}
-                  color={colors.gameAccent1}
-                  style={{ marginBottom: 16 }}
-                />
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 24,
-                    color: colors.text,
-                    textAlign: "center",
-                    marginBottom: 8,
-                  }}
-                >
+                <Trophy size={48} color={colors.gameAccent1} style={{ marginBottom: 16 }} />
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 24, color: colors.text, textAlign: "center", marginBottom: 8 }}>
                   Congratulations!
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 16,
-                    color: colors.textSecondary,
-                    textAlign: "center",
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 16, color: colors.textSecondary, textAlign: "center" }}>
                   Game complete! 🎉
                 </Text>
               </BlurView>
@@ -637,6 +515,66 @@ export default function MemoryMatchGame() {
           </View>
         )}
       </View>
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: colors.background,
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.border,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: colors.text }}>
+                Memory Match Achievements
+              </Text>
+              <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                <Text style={{ fontWeight: "600", fontSize: 14, color: colors.textSecondary }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {currentPlayerId && gameTypeId ? (
+                <AchievementsSection
+                  playerId={currentPlayerId}
+                  gameId={gameTypeId}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: colors.textSecondary, textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

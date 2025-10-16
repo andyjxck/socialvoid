@@ -1,18 +1,19 @@
-// src/app/(tabs)/games/simon-says.jsx
+// src/app/(tabs)/games/simon_says.jsx  (REPLACE ENTIRE FILE)
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions, Alert } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Alert, Animated, BackHandler, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { LinearGradient } from "expo-linear-gradient";
-import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import { ArrowLeft, RotateCcw, Play } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Play, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import { useTheme } from "../../../utils/theme";
+import { useIsFocused } from "@react-navigation/native";
+import AchievementsSection from "../../../components/AchievementsSection";
 import {
   useFonts,
   Inter_400Regular,
@@ -23,381 +24,299 @@ import {
 
 const { width: screenWidth } = Dimensions.get("window");
 
-const COLORS = [
-  { id: 0, name: "Green", color: "#10B981", lightColor: "#34D399" },
-  { id: 1, name: "Red", color: "#EF4444", lightColor: "#F87171" },
-  { id: 2, name: "Yellow", color: "#F59E0B", lightColor: "#FBBF24" },
-  { id: 3, name: "Blue", color: "#3B82F6", lightColor: "#60A5FA" },
+// Pads
+const BASE_COLORS = [
+  { id: 0, name: "Green",  color: "#10B981", lightColor: "#6EE7B7" },
+  { id: 1, name: "Red",    color: "#EF4444", lightColor: "#FCA5A5" },
+  { id: 2, name: "Yellow", color: "#F59E0B", lightColor: "#FDE68A" },
+  { id: 3, name: "Blue",   color: "#3B82F6", lightColor: "#93C5FD" },
 ];
+const EXTRA_COLORS = [
+  { id: 4, name: "Purple", color: "#8B5CF6", lightColor: "#C4B5FD" },
+  { id: 5, name: "Pink",   color: "#EC4899", lightColor: "#F9A8D4" },
+];
+
+const ON_MS = 520;
+const GAP_MS = 300;
 
 export default function SimonSaysGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
+  const isFocused = useIsFocused();
 
-  const [currentPlayerId, setCurrentPlayerId] = useState(null);
+  // IDs
+  const [playerId, setPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
-
-  // --- CANCELLATION + TIMER MANAGEMENT ---
-  const timeoutsRef = useRef([]); // all pending timeouts
-  const runIdRef = useRef(0); // increments to cancel any ongoing showSequence/flash
-  const mountedRef = useRef(true);
-
-  const scheduleTimeout = useCallback((fn, delay) => {
-    const id = setTimeout(fn, delay);
-    timeoutsRef.current.push(id);
-    return id;
-  }, []);
-
-  const delay = useCallback(
-    (ms) =>
-      new Promise((res) => {
-        scheduleTimeout(res, ms);
-      }),
-    [scheduleTimeout]
-  );
-
-  const clearAllTimers = useCallback(() => {
-    for (const id of timeoutsRef.current) clearTimeout(id);
-    timeoutsRef.current = [];
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-      clearAllTimers();
-    };
-  }, [clearAllTimers]);
-
-  // Get player ID from AsyncStorage
-  useEffect(() => {
-    const loadPlayerId = async () => {
-      try {
-        const savedPlayerId = await AsyncStorage.getItem(
-          "puzzle_hub_player_id"
-        );
-        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId) : 1);
-      } catch (error) {
-        console.error("Failed to load player ID:", error);
-        setCurrentPlayerId(1);
-      }
-    };
-    loadPlayerId();
-  }, []);
-
-  // Get the correct game ID and start tracking
-  useEffect(() => {
-    let active = true;
-    let currentGameId = null;
-
-    const setupGame = async () => {
-      if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.SIMON_SAYS);
-      if (id && currentPlayerId && active) {
-        currentGameId = id;
-        setGameId(id);
-        try {
-          await gameTracker.startGame(id, currentPlayerId);
-        } catch (e) {
-          console.warn("gameTracker.startGame failed:", e?.message || e);
-        }
-        console.log("🎮 Simon Says tracking started:", id);
-      } else if (active) {
-        console.error("❌ Could not get Simon Says game ID or player ID");
-      }
-    };
-
-    setupGame();
-
-    return () => {
-      active = false;
-      if (currentGameId) {
-        try {
-          gameTracker.endGame(currentGameId, 0);
-        } catch (e) {
-          console.warn(
-            "gameTracker.endGame on unmount failed:",
-            e?.message || e
-          );
-        }
-      }
-    };
-  }, [currentPlayerId]);
-
-  const [fontsLoaded] = useFonts({
-    Inter_400Regular,
-    Inter_500Medium,
-    Inter_600SemiBold,
-    Inter_700Bold,
-  });
 
   // Game state
   const [sequence, setSequence] = useState([]);
   const [playerSequence, setPlayerSequence] = useState([]);
   const [currentRound, setCurrentRound] = useState(0);
-  const [gameState, setGameState] = useState("waiting"); // waiting, showing, playing, gameover
+  const [gameState, setGameState] = useState("waiting"); // waiting | showing | playing | gameover
   const [activeColor, setActiveColor] = useState(null);
   const [bestScore, setBestScore] = useState(0);
-  const [lastScore, setLastScore] = useState(0);
   const [timer, setTimer] = useState(0);
-  const [gameStarted, setGameStarted] = useState(false);
+  const [extraUnlocked, setExtraUnlocked] = useState(false);
 
-  // Load saved scores
+  // Achievements
+  const [showAchievements, setShowAchievements] = useState(false);
+
+  // Anim/Timers
+  const unlockAnim = useRef(new Animated.Value(0)).current;
+  const playTimerRef = useRef(null);
+  const playIndexRef = useRef(0);
+  const showingRef = useRef(false);
+  const tickRef = useRef(null);
+
+  // Tracking session guard
+  const sessionOpenRef = useRef(false);
+  const endingRef = useRef(false); // prevent double end()
+
+  // Fonts
+  const [fontsLoaded] = useFonts({
+    Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold,
+  });
+
+  /* ───────────── IDs ───────────── */
   useEffect(() => {
-    const loadScores = async () => {
+    (async () => {
       try {
-        const saved = await AsyncStorage.getItem("simon_says_scores");
-        if (saved) {
-          const { best, last } = JSON.parse(saved);
-          setBestScore(best || 0);
-          setLastScore(last || 0);
-        }
-      } catch (error) {
-        console.error("Failed to load scores:", error);
-      }
-    };
-    loadScores();
+        const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
+        setPlayerId(saved ? parseInt(saved, 10) : 1);
+      } catch { setPlayerId(1); }
+    })();
   }, []);
 
-  const saveScores = useCallback(async (best, last) => {
-    try {
-      await AsyncStorage.setItem(
-        "simon_says_scores",
-        JSON.stringify({ best, last })
-      );
-    } catch (error) {
-      console.error("Failed to save scores:", error);
-    }
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!playerId) return;
+      try {
+        const id = await getGameId(GAME_TYPES.SIMON_SAYS);
+        if (alive) setGameId(id || null);
+      } catch { if (alive) setGameId(null); }
+    })();
+    return () => { alive = false; };
+  }, [playerId]);
+
+  /* ───────────── UI helpers ───────────── */
+  const clearShowTimers = useCallback(() => {
+    if (playTimerRef.current) { clearTimeout(playTimerRef.current); playTimerRef.current = null; }
+    showingRef.current = false;
+    playIndexRef.current = 0;
   }, []);
 
-  // Timer effect
-  useEffect(() => {
-    let interval;
-    if (gameStarted && gameState !== "gameover") {
-      interval = setInterval(() => {
-        setTimer((prev) => prev + 1);
-      }, 1000);
-    }
-    return () => clearInterval(interval);
-  }, [gameStarted, gameState]);
+  const startUITimer = useCallback(() => {
+    if (tickRef.current) clearInterval(tickRef.current);
+    tickRef.current = setInterval(() => setTimer(t => t + 1), 1000);
+  }, []);
+  const stopUITimer = useCallback(() => {
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
+  }, []);
 
-  // FLASH (cancellable)
-  const flashColor = useCallback(
-    async (colorId, duration = 500) => {
-      const myRun = runIdRef.current;
-      setActiveColor(colorId);
-      try {
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      } catch {}
-      await delay(duration);
-      // Only clear if this run is still active
-      if (runIdRef.current === myRun && mountedRef.current) {
-        setActiveColor(null);
-      }
-    },
-    [delay]
-  );
-
-  // SHOW SEQUENCE (cancellable & uses explicit sequence argument)
-  const showSequence = useCallback(
-    async (seq, myRun) => {
-      // Guard: cancel any pending timeouts for cleanliness (fresh show)
-      clearAllTimers();
-      setGameState("showing");
-      setPlayerSequence([]);
-
-      await delay(500);
-      for (const colorId of seq) {
-        if (runIdRef.current !== myRun || !mountedRef.current) return; // cancelled
-        await flashColor(colorId, 500);
-        if (runIdRef.current !== myRun || !mountedRef.current) return; // cancelled
-        await delay(300); // spacing between flashes
-      }
-
-      if (runIdRef.current === myRun && mountedRef.current) {
-        setGameState("playing");
-      }
-    },
-    [flashColor, delay, clearAllTimers]
-  );
-
-  // Start new game (fully resets + cancels any prior timers)
-  const startNewGame = useCallback(async () => {
-    // submit current run first if restarting mid-run
-    if (currentRound > 0) {
-      submitScore(currentRound, "restart");
-    }
-
-    clearAllTimers();
-    const myRun = ++runIdRef.current; // invalidate previous sequences immediately
-
-    console.log("🎮 Starting new Simon Says game");
-    const firstColor = Math.floor(Math.random() * 4);
-    const initialSeq = [firstColor];
-
-    setSequence(initialSeq);
+  const softResetForNewRound = useCallback(() => {
+    // Reset only per-round state; keep header and overall UI intact
+    clearShowTimers();
     setPlayerSequence([]);
-    setCurrentRound(1);
     setActiveColor(null);
-    setTimer(0);
-    setGameStarted(true);
+  }, [clearShowTimers]);
+
+  const hardResetAllUI = useCallback(() => {
+    clearShowTimers();
+    stopUITimer();
     setGameState("waiting");
+    setActiveColor(null);
+    setSequence([]);
+    setPlayerSequence([]);
+    setCurrentRound(0);
+    setTimer(0);
+    setExtraUnlocked(false);
+  }, [clearShowTimers, stopUITimer]);
 
-    await delay(800);
-    if (runIdRef.current !== myRun || !mountedRef.current) return;
+  /* ───────────── Tracking open/close ───────────── */
+  const openTrackedSession = useCallback(async () => {
+    if (sessionOpenRef.current || !playerId || !gameId) return;
+    try {
+      await gameTracker.startGame(gameId, playerId);
+      sessionOpenRef.current = true;
+      endingRef.current = false;
+    } catch { /* ignore */ }
+  }, [playerId, gameId]);
 
-    console.log("🎵 Showing initial sequence:", initialSeq);
-    await showSequence(initialSeq, myRun);
-  }, [delay, showSequence, clearAllTimers, currentRound]);
+  const closeTrackedSession = useCallback(async (score = 0, meta = {}) => {
+    if (!sessionOpenRef.current || endingRef.current || !gameId) return;
+    endingRef.current = true;
+    try { await gameTracker.endGame(gameId, score, meta); } catch { /* ignore */ }
+    sessionOpenRef.current = false;
+    endingRef.current = false;
+  }, [gameId]);
 
-  // Submit score to tracker; only include high_score if this run beats local best
-  const submitScore = useCallback(
-    (score, reason) => {
-      if (!gameId) return;
-      const meta = { result: "play", reason };
-      if (score > bestScore) meta.high_score = score; // only send when it's actually higher
-      try {
-        gameTracker.endGame(gameId, score, meta);
-      } catch (e) {
-        console.warn("gameTracker.endGame failed:", e?.message || e);
-      }
-    },
-    [gameId, bestScore]
-  );
+  /* ───────────── Focus/Blur lifecycle ─────────────
+     - On focus: open (or keep) tracking session. DO NOT reset UI.
+     - On blur:  end session and reset UI.
+  -------------------------------------------------- */
+  useEffect(() => {
+    if (!gameId || !playerId) return;
 
-  // Handle color press
-  const handleColorPress = useCallback(
-    async (colorId) => {
-      if (gameState !== "playing") return;
+    const onFocus = async () => {
+      await openTrackedSession();
+      // do not reset UI here — avoids the “refresh” feel on entry
+    };
 
-      const expected = sequence[playerSequence.length];
+    const onBlur = async () => {
+      await closeTrackedSession(currentRound, { result: "blur" });
+      hardResetAllUI();
+    };
 
-      try {
-        await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      } catch {}
-      // Quick tap feedback, but do not queue stray timeouts (handled via flashColor + cancellation)
-      flashColor(colorId, 250);
+    if (isFocused) onFocus(); else onBlur();
+  }, [isFocused, gameId, playerId, openTrackedSession, closeTrackedSession, hardResetAllUI, currentRound]);
 
-      const newPlayerSequence = [...playerSequence, colorId];
-      setPlayerSequence(newPlayerSequence);
+  /* ───────────── Sequence player ───────────── */
+  const stepShow = useCallback((seq) => {
+    if (!showingRef.current) return;
 
-      // Wrong pick
-      const idx = newPlayerSequence.length - 1;
-      if (newPlayerSequence[idx] !== expected) {
-        // Cancel any in-flight animations/timeouts and mark gameover
-        clearAllTimers();
-        const myRun = ++runIdRef.current;
+    if (playIndexRef.current >= seq.length) {
+      setActiveColor(null);
+      setGameState("playing");
+      playTimerRef.current = null;
+      showingRef.current = false;
+      return;
+    }
 
-        setGameState("gameover");
-        const score = currentRound;
-        setLastScore(score);
+    const colorId = seq[playIndexRef.current];
+    setActiveColor(colorId);
+    try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
 
-        if (score > bestScore) {
-          setBestScore(score);
-          saveScores(score, score);
-        } else {
-          saveScores(bestScore, score);
-        }
-
-        // submit score (code persistent)
-        submitScore(score, "wrong");
-
-        try {
-          await Haptics.notificationAsync(
-            Haptics.NotificationFeedbackType.Error
-          );
-        } catch {}
-
-        if (!mountedRef.current) return;
-        Alert.alert(
-          "Game Over! 🎵",
-          `You made it to round ${score}!${
-            score > bestScore ? " New best score!" : ""
-          }`,
-          [
-            { text: "Play Again", onPress: () => startNewGame() },
-            { text: "Back to Hub", onPress: () => handleBackPress() },
-          ]
-        );
-        return;
-      }
-
-      // Completed round
-      if (newPlayerSequence.length === sequence.length) {
-        try {
-          await Haptics.notificationAsync(
-            Haptics.NotificationFeedbackType.Success
-          );
-        } catch {}
-
-        setGameState("waiting"); // stop input immediately
-        setPlayerSequence([]);
-        setCurrentRound((prev) => prev + 1);
-
-        // Build next sequence deterministically and show it using cancellable runner
-        const nextColor = Math.floor(Math.random() * 4);
-        const newSeq = [...sequence, nextColor];
-        setSequence(newSeq);
-
-        // small pause before showing new round
-        await delay(700);
-        const myRun = runIdRef.current; // do NOT increment here; keep same run
-        if (mountedRef.current) {
-          console.log(
-            "🎵 New sequence:",
-            newSeq.map((c) => COLORS[c].name)
-          );
-          await showSequence(newSeq, myRun);
-        }
-      }
-    },
-    [
-      gameState,
-      playerSequence,
-      sequence,
-      currentRound,
-      bestScore,
-      saveScores,
-      startNewGame,
-      flashColor,
-      delay,
-      showSequence,
-      clearAllTimers,
-      submitScore,
-    ]
-  );
-
-  // Back handler (submit current score, even mid-round)
- // Back handler → submit current score, hard reset local state, then leave
-const handleBackPress = useCallback(() => {
-  // 1) Persist the run (even mid-round)
-  submitScore(currentRound, "back");
-
-  // 2) Cancel any pending flashes/delays
-  clearAllTimers();
-
-  // 3) Invalidate any in-flight sequence playback
-  runIdRef.current += 1;
-
-  // 4) Hard reset local state so next entry starts fresh at 0
-  setSequence([]);
-  setPlayerSequence([]);
-  setCurrentRound(0);
-  setActiveColor(null);
-  setTimer(0);
-  setGameStarted(false);
-  setGameState("waiting");
-
-  // 5) Navigate away
-  router.back();
-}, [submitScore, currentRound, clearAllTimers]);
-
-
-  // Format time
-  const formatTime = useCallback((seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+    playTimerRef.current = setTimeout(() => {
+      setActiveColor(null);
+      playTimerRef.current = setTimeout(() => {
+        playIndexRef.current += 1;
+        stepShow(seq);
+      }, GAP_MS);
+    }, ON_MS);
   }, []);
+
+  const beginShow = useCallback((seq) => {
+    clearShowTimers();
+    showingRef.current = true;
+    setGameState("showing");
+    setPlayerSequence([]);
+    playTimerRef.current = setTimeout(() => stepShow(seq), 280);
+  }, [stepShow, clearShowTimers]);
+
+  /* ───────────── Controls ───────────── */
+  const startNewGame = useCallback(async () => {
+    // If a previous round ended the session (loss/back), quietly open a new one
+    if (!sessionOpenRef.current) await openTrackedSession();
+
+    softResetForNewRound();
+    setTimer(0);
+    startUITimer();
+
+    const first = Math.floor(Math.random() * BASE_COLORS.length);
+    const firstSeq = [first];
+
+    setSequence(firstSeq);
+    setCurrentRound(1);
+    setGameState("showing");
+    beginShow(firstSeq);
+  }, [softResetForNewRound, startUITimer, beginShow, openTrackedSession]);
+
+  const endRunOnLose = useCallback(async (roundReached) => {
+    stopUITimer();
+    setGameState("gameover");
+
+    // End this tracked run; stay on screen (no UI reset)
+    await closeTrackedSession(roundReached, { result: "lose" });
+
+    try { await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); } catch {}
+    Alert.alert(
+      "Game Over",
+      `You reached round ${roundReached}`,
+      [
+        { text: "Play Again", onPress: () => startNewGame() },
+        { text: "Back", onPress: () => handleBackPress(true) },
+      ],
+      { cancelable: false }
+    );
+  }, [closeTrackedSession, startNewGame, stopUITimer]);
+
+  const handleColorPress = useCallback(async (colorId) => {
+    if (gameState !== "playing") return;
+
+    const expected = sequence[playerSequence.length];
+
+    try { await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
+    setActiveColor(colorId);
+    setTimeout(() => setActiveColor(null), 160);
+
+    const nextPlayer = [...playerSequence, colorId];
+    setPlayerSequence(nextPlayer);
+
+    // Wrong
+    if (nextPlayer[nextPlayer.length - 1] !== expected) {
+      await endRunOnLose(currentRound);
+      return;
+    }
+
+    // Completed round
+    if (nextPlayer.length === sequence.length) {
+      setGameState("waiting");
+      setPlayerSequence([]);
+      const nextRound = currentRound + 1;
+      setCurrentRound(nextRound);
+
+      // Unlock extra colors at 15
+      if (nextRound === 15 && !extraUnlocked) {
+        setExtraUnlocked(true);
+        Animated.sequence([
+          Animated.timing(unlockAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+          Animated.delay(1500),
+          Animated.timing(unlockAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+        ]).start();
+        try { await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+      }
+
+      const pool = nextRound >= 15 ? [...BASE_COLORS, ...EXTRA_COLORS] : BASE_COLORS;
+      const nextColor = Math.floor(Math.random() * pool.length);
+      const newSeq = [...sequence, nextColor];
+      setSequence(newSeq);
+
+      beginShow(newSeq);
+    }
+  }, [gameState, sequence, playerSequence, currentRound, extraUnlocked, unlockAnim, beginShow, endRunOnLose]);
+
+  const handleBackPress = useCallback(async (fromAlert = false) => {
+    // End session (if open) with current progress; then leave
+    await closeTrackedSession(currentRound, { result: "back" });
+    hardResetAllUI();
+    if (!fromAlert) router.back();
+  }, [closeTrackedSession, currentRound, hardResetAllUI]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      handleBackPress();
+      return true;
+    });
+    return () => sub.remove();
+  }, [handleBackPress]);
+
+  // Track best (UI only)
+  useEffect(() => {
+    if (gameState === "gameover" || gameState === "waiting") {
+      setBestScore(prev => Math.max(prev, currentRound));
+    }
+  }, [gameState, currentRound]);
+
+  // Pause timer when achievements open
+  useEffect(() => {
+    if (showAchievements) stopUITimer();
+    else if (gameState === "showing" || gameState === "playing") startUITimer();
+  }, [showAchievements, gameState, startUITimer, stopUITimer]);
+
+  const formatTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
+  const colorPool = currentRound >= 15 ? [...BASE_COLORS, ...EXTRA_COLORS] : BASE_COLORS;
+  const padSize = currentRound >= 15 ? (screenWidth - 80 - 24) / 3 : (screenWidth - 80 - 16) / 2;
 
   if (!fontsLoaded) return null;
 
@@ -407,265 +326,180 @@ const handleBackPress = useCallback(() => {
       <NightSkyBackground />
 
       {/* Header */}
-      <View
-        style={{
-          paddingTop: insets.top + 16,
-          paddingHorizontal: 20,
-          marginBottom: 20,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 16,
-          }}
-        >
-          <TouchableOpacity
-            onPress={handleBackPress}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <ArrowLeft size={24} color={colors.text} />
+      <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, marginBottom: 20 }}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+          <TouchableOpacity onPress={() => handleBackPress()} style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}>
+            <ArrowLeft size={22} color={colors.text} />
           </TouchableOpacity>
-
-          <Text
-            style={{
-              fontFamily: "Inter_700Bold",
-              fontSize: 20,
-              color: colors.text,
-            }}
-          >
-            Simon Says
-          </Text>
-
-          <TouchableOpacity
-            onPress={startNewGame}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: colors.text }}>Pattern Match</Text>
+          <View style={{ flexDirection: "row", gap: 10 }}>
+            <TouchableOpacity onPress={() => setShowAchievements(true)} style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}>
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={startNewGame} style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}>
+              <RotateCcw size={22} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* Game stats */}
-        <View
-          style={{
-            borderRadius: 16,
-            overflow: "hidden",
-          }}
-        >
-          <BlurView
-            intensity={isDark ? 60 : 80}
-            tint={isDark ? "dark" : "light"}
-            style={{
-              backgroundColor: isDark
-                ? "rgba(31, 41, 55, 0.7)"
-                : "rgba(255, 255, 255, 0.7)",
-              borderWidth: 1,
-              borderColor: colors.border,
-              borderRadius: 16,
-              padding: 16,
-            }}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                justifyContent: "space-around",
-                alignItems: "center",
-              }}
-            >
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Round
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent1,
-                  }}
-                >
-                  {currentRound}
-                </Text>
-              </View>
-
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Best
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent1,
-                  }}
-                >
-                  {bestScore}
-                </Text>
-              </View>
-
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Time
-                </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent1,
-                  }}
-                >
-                  {formatTime(timer)}
-                </Text>
-              </View>
+        {/* Stats */}
+        <BlurView intensity={isDark ? 60 : 80} tint={isDark ? "dark" : "light"} style={{ borderRadius: 16, marginTop: 16, padding: 14, borderWidth: 1, borderColor: colors.border }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-around", alignItems: "center" }}>
+            <View style={{ alignItems: "center" }}>
+              <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>Round</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent1 }}>{currentRound}</Text>
             </View>
-          </BlurView>
-        </View>
+            <View style={{ alignItems: "center" }}>
+              <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>Best</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent1 }}>{bestScore}</Text>
+            </View>
+            <View style={{ alignItems: "center" }}>
+              <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 2 }}>Time</Text>
+              <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent1 }}>{formatTime(timer)}</Text>
+            </View>
+          </View>
+        </BlurView>
       </View>
 
-      {/* Game status */}
-      <View style={{ paddingHorizontal: 20, marginBottom: 20 }}>
-        <Text
-          style={{
-            fontFamily: "Inter_600SemiBold",
-            fontSize: 16,
-            color: colors.text,
-            textAlign: "center",
-          }}
-        >
-          {gameState === "waiting" &&
-            (currentRound === 0 ? "Tap 'New Game' to start!" : "Get ready...")}
-          {gameState === "showing" && "Watch the pattern..."}
-          {gameState === "playing" && "Your turn! Repeat the pattern"}
-          {gameState === "gameover" && "Game Over!"}
-        </Text>
-      </View>
+      {/* Status */}
+      <Text style={{ textAlign: "center", color: colors.text, fontFamily: "Inter_600SemiBold", fontSize: 16, marginBottom: 8 }}>
+        {gameState === "waiting" && (currentRound === 0 ? "Tap 'New Game' to start!" : "Get ready…")}
+        {gameState === "showing" && "Watch the pattern…"}
+        {gameState === "playing" && "Your turn! Repeat the pattern"}
+        {gameState === "gameover" && "Game Over"}
+      </Text>
 
-      {/* Color pads */}
-      <View
-        style={{
-          flex: 1,
-          paddingHorizontal: 20,
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <View
-          style={{
-            width: screenWidth - 80,
-            height: screenWidth - 80,
-            flexDirection: "row",
-            flexWrap: "wrap",
-            gap: 16,
-          }}
-        >
-          {COLORS.map((colorData) => (
+      {/* Pads */}
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+        <View style={{ width: screenWidth - 80, flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 12 }}>
+          {colorPool.map((c) => (
             <TouchableOpacity
-              key={colorData.id}
-              onPress={() => handleColorPress(colorData.id)}
+              key={c.id}
+              onPress={() => handleColorPress(c.id)}
+              disabled={gameState !== "playing"}
+              activeOpacity={0.85}
               style={{
-                width: (screenWidth - 80 - 16) / 2,
-                height: (screenWidth - 80 - 16) / 2,
+                width: padSize,
+                height: padSize,
                 borderRadius: 16,
-                backgroundColor:
-                  activeColor === colorData.id
-                    ? colorData.lightColor
-                    : colorData.color,
+                backgroundColor: activeColor === c.id ? c.lightColor : c.color,
                 justifyContent: "center",
                 alignItems: "center",
-                opacity: gameState === "playing" ? 1 : 0.7,
-                transform: [{ scale: activeColor === colorData.id ? 0.95 : 1 }],
-                shadowColor: colorData.color,
+                opacity: gameState === "playing" ? 1 : 0.88,
+                transform: [{ scale: activeColor === c.id ? 0.96 : 1 }],
+                borderWidth: activeColor === c.id ? 3 : 0,
+                borderColor: activeColor === c.id ? "#FFFFFF" : "transparent",
+                shadowColor: c.color,
                 shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: activeColor === colorData.id ? 0.5 : 0.2,
+                shadowOpacity: activeColor === c.id ? 0.6 : 0.25,
                 shadowRadius: 8,
-                elevation: 8,
+                elevation: 10,
               }}
-              activeOpacity={0.8}
-              disabled={gameState !== "playing"}
             >
-              <Text
-                style={{
-                  fontFamily: "Inter_700Bold",
-                  fontSize: 18,
-                  color: "white",
-                  textShadowColor: "rgba(0, 0, 0, 0.3)",
-                  textShadowOffset: { width: 0, height: 1 },
-                  textShadowRadius: 2,
-                }}
-              >
-                {colorData.name}
+              <Text style={{ color: "white", fontFamily: "Inter_700Bold", fontSize: 16 }}>
+                {c.name}
               </Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Start button */}
-        {gameState === "waiting" && currentRound === 0 && (
-          <TouchableOpacity
-            onPress={startNewGame}
-            style={{
-              marginTop: 40,
-              paddingHorizontal: 32,
-              paddingVertical: 16,
-              borderRadius: 16,
-              backgroundColor: colors.gameAccent1,
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <Play size={20} color="white" />
-            <Text
-              style={{
-                fontFamily: "Inter_700Bold",
-                fontSize: 16,
-                color: "white",
-              }}
-            >
-              New Game
-            </Text>
-          </TouchableOpacity>
-        )}
+        {/* Unlock toast */}
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: "absolute",
+            bottom: "20%",
+            opacity: unlockAnim,
+            transform: [{ scale: unlockAnim.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }) }],
+          }}
+        >
+          <BlurView intensity={80} tint="dark" style={{ borderRadius: 20, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: "rgba(139,92,246,0.2)", borderWidth: 1, borderColor: "rgba(255,255,255,0.25)" }}>
+            <Text style={{ fontSize: 18, fontWeight: "bold", color: "#A78BFA", textAlign: "center" }}>✨ New Colors Unlocked! ✨</Text>
+            <Text style={{ color: "#F9A8D4", textAlign: "center", marginTop: 2, fontSize: 14 }}>Purple and Pink added!</Text>
+          </BlurView>
+        </Animated.View>
       </View>
 
-      {/* Bottom padding */}
-      <View style={{ height: insets.bottom + 20 }} />
+      {/* Start button */}
+      {gameState === "waiting" && currentRound === 0 && (
+        <TouchableOpacity
+          onPress={startNewGame}
+          style={{
+            alignSelf: "center",
+            marginBottom: insets.bottom + 28,
+            paddingHorizontal: 32,
+            paddingVertical: 14,
+            borderRadius: 16,
+            backgroundColor: colors.gameAccent1,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <Play size={20} color="white" />
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: "white" }}>New Game</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: colors.border,
+              backgroundColor: isDark ? "rgba(0,0,0,0.9)" : colors.background,
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.border,
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: colors.text }}>
+                Simon Says Achievements
+              </Text>
+              <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                <Text style={{ fontWeight: "600", fontSize: 14, color: colors.textSecondary }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {playerId && gameId ? (
+                <AchievementsSection
+                  playerId={playerId}
+                  gameId={gameId}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: colors.textSecondary, textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

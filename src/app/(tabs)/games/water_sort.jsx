@@ -1,36 +1,44 @@
+// src/app/(tabs)/games/watersort.jsx
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Alert } from "react-native";
+import { View, Text, TouchableOpacity, Alert, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { ArrowLeft, RotateCcw } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Trophy } from "lucide-react-native";
 import { BlurView } from "expo-blur";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "@react-navigation/native";
 
 import { useTheme } from "../../../utils/theme";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
+import AchievementsSection from "../../../components/AchievementsSection";
 
 export default function WaterSortGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
 
-  // ---- Player & game ids ----
+  /* ───────────────────────────
+   * IDs & run/session guards
+   * ─────────────────────────── */
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
   const gameIdRef = useRef(null);
 
-  // ---- Code-Persistent run guards ----
-  const activeRef = useRef(false);     // true when a run is active
-  const submittedRef = useRef(false);  // true after endGame has been called once
+  const activeRef = useRef(false);
+  const submittedRef = useRef(false);
 
-  // ---- Persistent Level (per player) ----
+  /* ───────────────────────────
+   * Persistent Level (per player)
+   * ─────────────────────────── */
   const [level, setLevel] = useState(1);
-  const levelLoadedRef = useRef(false);
+  const [levelReady, setLevelReady] = useState(false); // gate initialization
 
-  // ---- Game state ----
+  /* ───────────────────────────
+   * Game state
+   * ─────────────────────────── */
   const [bottles, setBottles] = useState([]);
   const [selectedBottle, setSelectedBottle] = useState(null);
   const [moves, setMoves] = useState(0);
@@ -38,56 +46,68 @@ export default function WaterSortGame() {
   const [timer, setTimer] = useState(0);
   const [gameStarted, setGameStarted] = useState(false);
 
-  // ---- Constants ----
+  /* ───────────────────────────
+   * Achievements UI
+   * ─────────────────────────── */
+  const [showAchievements, setShowAchievements] = useState(false);
+
+  /* ───────────────────────────
+   * Constants
+   * ─────────────────────────── */
   const BOTTLE_CAPACITY = 4;
   const waterColors = [
-    "#FF0000","#00FF00","#0000FF","#FFFF00","#FF00FF",
-    "#00FFFF","#FFA500","#800080","#FFC0CB","#A52A2A",
+    "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF",
+    "#00FFFF", "#FFA500", "#800080", "#FFC0CB", "#A52A2A",
   ];
 
-  // ======== PLAYER / GAME SETUP ========
-
-  // Load player id
+  /* ───────────────────────────
+   * PLAYER → LEVEL → GAME ID load (in that order)
+   * Includes migration from legacy key "water_sort_level"
+   * ─────────────────────────── */
   useEffect(() => {
-    let mounted = true;
+    let alive = true;
     (async () => {
+      // 1) Player id
+      let pid = 1;
       try {
         const saved = await AsyncStorage.getItem("puzzle_hub_player_id");
-        const pid = saved ? parseInt(saved, 10) : 1;
-        if (mounted) setCurrentPlayerId(pid);
-      } catch (e) {
-        if (mounted) setCurrentPlayerId(1);
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
+        const parsed = saved ? parseInt(saved, 10) : 1;
+        pid = Number.isFinite(parsed) ? parsed : 1;
+      } catch {}
+      if (!alive) return;
+      setCurrentPlayerId(pid);
 
-  // Resolve game id when we have player
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.WATER_SORT);
-      if (mounted) {
+      // 2) Load level for this player (with legacy fallback)
+      try {
+        const perPlayerKey = `water_sort_level_${pid}`;
+        const legacyKey = "water_sort_level";
+        let savedLevel = await AsyncStorage.getItem(perPlayerKey);
+        if (!savedLevel) {
+          const legacy = await AsyncStorage.getItem(legacyKey);
+          if (legacy) {
+            savedLevel = legacy;
+            // adopt legacy to per-player key
+            await AsyncStorage.setItem(perPlayerKey, legacy);
+            // optional: await AsyncStorage.removeItem(legacyKey);
+          }
+        }
+        const lvl = savedLevel ? Math.max(1, parseInt(savedLevel, 10)) : 1;
+        if (!alive) return;
+        setLevel(lvl);
+      } catch {}
+      if (!alive) return;
+      setLevelReady(true);
+
+      // 3) Resolve numeric game id
+      try {
+        const id = await getGameId(GAME_TYPES.WATER_SORT);
+        if (!alive) return;
         setGameId(id);
         gameIdRef.current = id;
-      }
+      } catch {}
     })();
-    return () => { mounted = false; };
-  }, [currentPlayerId]);
-
-  // Load persisted level once we know player id
-  useEffect(() => {
-    (async () => {
-      if (!currentPlayerId || levelLoadedRef.current) return;
-      try {
-        const key = `water_sort_level_${currentPlayerId}`;
-        const savedLevel = await AsyncStorage.getItem(key);
-        if (savedLevel) setLevel(Math.max(1, parseInt(savedLevel, 10)));
-      } catch (e) {}
-      levelLoadedRef.current = true;
-    })();
-  }, [currentPlayerId]);
+    return () => { alive = false; };
+  }, []);
 
   // Persist level on change (per player)
   useEffect(() => {
@@ -96,74 +116,77 @@ export default function WaterSortGame() {
       try {
         const key = `water_sort_level_${currentPlayerId}`;
         await AsyncStorage.setItem(key, String(level));
-      } catch (e) {}
+      } catch {}
     })();
   }, [level, currentPlayerId]);
 
-  // ======== CODE-PERSISTENT HELPERS ========
-
+  /* ───────────────────────────
+   * Run helpers
+   * ─────────────────────────── */
   const startRun = useCallback(async () => {
     if (!gameIdRef.current || !currentPlayerId) return;
-    // If we somehow had a previous active run not submitted, end as 0 (counts as a play)
+    // Close any stray active run
     if (activeRef.current && !submittedRef.current) {
-      try { await gameTracker.endGame(gameIdRef.current, 0); } catch (e) {}
+      try { await gameTracker.endGame(gameIdRef.current, 0, { reason: "autoclose" }); } catch {}
       submittedRef.current = true;
       activeRef.current = false;
     }
-    try { await gameTracker.startGame(gameIdRef.current, currentPlayerId); } catch (e) {}
+    try { await gameTracker.startGame(gameIdRef.current, currentPlayerId); } catch {}
     submittedRef.current = false;
     activeRef.current = true;
   }, [currentPlayerId]);
 
-  const endRunWith = useCallback(async (score) => {
+  const endRunWith = useCallback(async (score, meta = {}) => {
     if (!gameIdRef.current) return;
     if (!activeRef.current || submittedRef.current) return;
-    try { await gameTracker.endGame(gameIdRef.current, score); } catch (e) {}
-    submittedRef.current = true;
-    activeRef.current = false;
-  }, []);
-
- const handleBack = useCallback(async () => {
-  // force a 0-score session even if the run is no longer marked active
-  if (gameIdRef.current && !submittedRef.current) {
     try {
-      await gameTracker.endGame(gameIdRef.current, 0);
+      await gameTracker.endGame(gameIdRef.current, score, {
+        ...meta,
+        duration: timer,
+      });
     } catch {}
     submittedRef.current = true;
-  }
-  activeRef.current = false;
-  router.back();
-}, []);
+    activeRef.current = false;
+  }, [timer]);
 
+  const handleBack = useCallback(async () => {
+    if (gameIdRef.current && !submittedRef.current) {
+      try { await gameTracker.endGame(gameIdRef.current, 0, { reason: "back" }); } catch {}
+      submittedRef.current = true;
+    }
+    activeRef.current = false;
+    router.back();
+  }, []);
 
+  // Ensure a session gets ended on unmount
   useEffect(() => {
     return () => {
-      // Unmount: if mid-run, count as play 0
       if (activeRef.current && !submittedRef.current && gameIdRef.current) {
-        try { gameTracker.endGame(gameIdRef.current, 0); } catch (e) {}
+        try { gameTracker.endGame(gameIdRef.current, 0, { reason: "unmount" }); } catch {}
         submittedRef.current = true;
         activeRef.current = false;
       }
     };
   }, []);
 
-  // ======== GAME LOGIC ========
-
-  // Timer
+  /* ───────────────────────────
+   * Timer
+   * ─────────────────────────── */
   useEffect(() => {
     let id;
-    if (gameStarted && !gameWon) {
+    if (gameStarted && !gameWon && !showAchievements) {
       id = setInterval(() => setTimer((t) => t + 1), 1000);
     }
     return () => { if (id) clearInterval(id); };
-  }, [gameStarted, gameWon]);
+  }, [gameStarted, gameWon, showAchievements]);
 
-  // Generate a puzzle for a given level
+  /* ───────────────────────────
+   * Puzzle generation & rules
+   * ─────────────────────────── */
   const generatePuzzle = (levelNum) => {
     const numColors = Math.min(3 + Math.floor(levelNum / 2), 8); // 3..8
     const numBottles = numColors + 2; // two empties
-    const puzzle = [];
-    for (let i = 0; i < numBottles; i++) puzzle.push([]);
+    const puzzle = Array.from({ length: numBottles }, () => []);
 
     const colorUnits = [];
     for (let c = 0; c < numColors; c++) {
@@ -172,18 +195,13 @@ export default function WaterSortGame() {
     // shuffle
     for (let i = colorUnits.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      const tmp = colorUnits[i];
-      colorUnits[i] = colorUnits[j];
-      colorUnits[j] = tmp;
+      [colorUnits[i], colorUnits[j]] = [colorUnits[j], colorUnits[i]];
     }
-    // distribute into first (numBottles - 2) bottles
+    // fill all but last two bottles
     let idx = 0;
     for (let b = 0; b < numBottles - 2; b++) {
-      for (let s = 0; s < BOTTLE_CAPACITY; s++) {
-        puzzle[b].push(colorUnits[idx++]);
-      }
+      for (let s = 0; s < BOTTLE_CAPACITY; s++) puzzle[b].push(colorUnits[idx++]);
     }
-    // last two are empty
     return puzzle;
   };
 
@@ -195,7 +213,7 @@ export default function WaterSortGame() {
       if (bottle[i] === top) buf.push(bottle[i]);
       else break;
     }
-    return buf; // all same color from top
+    return buf;
   };
 
   const canPour = (fromBottle, toBottle) => {
@@ -219,9 +237,11 @@ export default function WaterSortGame() {
     return true;
   };
 
-  // Initialize a run
+  /* ───────────────────────────
+   * Initialize a run (after levelReady)
+   * ─────────────────────────── */
   const initializeGame = useCallback(async () => {
-    await startRun(); // start tracking when a new run actually starts
+    await startRun();
     const newBottles = generatePuzzle(level);
     setBottles(newBottles);
     setSelectedBottle(null);
@@ -231,13 +251,24 @@ export default function WaterSortGame() {
     setGameStarted(true);
   }, [level, startRun]);
 
-  // Auto-init when level (persisted) is ready
-  useEffect(() => {
-    if (levelLoadedRef.current) {
-      initializeGame();
-    }
-  }, [level, initializeGame]);
+  // Auto-start on focus only when playerId, gameId, and level are ready
+  useFocusEffect(
+    useCallback(() => {
+      let mounted = true;
+      const boot = async () => {
+        if (!mounted) return;
+        if (!levelReady) return;
+        if (!currentPlayerId || !gameId) return;
+        await initializeGame();
+      };
+      boot();
+      return () => { mounted = false; };
+    }, [levelReady, currentPlayerId, gameId, initializeGame])
+  );
 
+  /* ───────────────────────────
+   * Interaction
+   * ─────────────────────────── */
   const pourWater = (fromIndex, toIndex) => {
     const newBottles = bottles.slice();
     const fromBottle = newBottles[fromIndex].slice();
@@ -259,18 +290,21 @@ export default function WaterSortGame() {
     setMoves((m) => m + 1);
 
     if (checkWinCondition(newBottles)) {
+      const nextLevel = level + 1;
+      setLevel(nextLevel);
       setGameWon(true);
-      const score = Math.max(100, 1000 - moves * 10 + level * 100 - timer);
-      endRunWith(score); // submit once (win)
+
+      const score = Math.max(100, 1000 - (moves + 1) * 10 + level * 100 - timer);
+      endRunWith(score, { result: "win", winner: "Player" });
+
       Alert.alert(
         "Level Complete! 🎉",
-        "Level " + level + " solved in " + (moves + 1) + " moves!\nScore: " + score,
+        `Level ${level} solved in ${moves + 1} moves!\nScore: ${score}`,
         [
           {
             text: "Next Level",
             onPress: async () => {
-              setLevel((prev) => prev + 1);
-              setGameWon(false);
+              await initializeGame();
             },
           },
           { text: "Back to Hub", onPress: () => handleBack() },
@@ -282,9 +316,7 @@ export default function WaterSortGame() {
 
   const handleBottlePress = async (i) => {
     if (gameWon) return;
-
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-
     if (selectedBottle === null) {
       if (bottles[i] && bottles[i].length > 0) setSelectedBottle(i);
     } else {
@@ -307,8 +339,10 @@ export default function WaterSortGame() {
     return m + ":" + s.toString().padStart(2, "0");
   };
 
-  if (!levelLoadedRef.current) {
-    // Lightweight splash while we load level & ids
+  /* ───────────────────────────
+   * UI
+   * ─────────────────────────── */
+  if (!levelReady) {
     return (
       <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: isDark ? "#000" : "#fff" }}>
         <StatusBar style={isDark ? "light" : "dark"} />
@@ -344,16 +378,24 @@ export default function WaterSortGame() {
             Water Sort
           </Text>
 
-          <TouchableOpacity
-            onPress={async () => {
-              // Reset mid-run counts as play 0, then start new run
-              await endRunWith(0);
-              initializeGame();
-            }}
-            style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              onPress={() => setShowAchievements(true)}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={async () => {
+                await endRunWith(0, { reason: "reset" });
+                await initializeGame();
+              }}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <RotateCcw size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Stats */}
@@ -493,6 +535,67 @@ export default function WaterSortGame() {
           Consecutive same colors pour together from the TOP.
         </Text>
       </View>
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.15)",
+              backgroundColor: "rgba(0,0,0,0.9)",
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: "rgba(255,255,255,0.12)",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: "#fff" }}>
+                Water Sort Achievements
+              </Text>
+              <TouchableOpacity onPress={() => setShowAchievements(false)} hitSlop={10}>
+                <Text style={{ fontWeight: "600", fontSize: 14, color: "rgba(255,255,255,0.75)" }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {currentPlayerId != null && gameIdRef.current != null ? (
+                <AchievementsSection
+                  key={`${gameIdRef.current}-${currentPlayerId}`}
+                  playerId={currentPlayerId}
+                  gameId={gameIdRef.current}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: "rgba(255,255,255,0.75)", textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

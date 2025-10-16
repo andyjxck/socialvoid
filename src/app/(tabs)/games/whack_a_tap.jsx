@@ -1,17 +1,18 @@
 // mobile/src/app/games/WhackATapGame.jsx
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions, Alert, BackHandler } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Alert, BackHandler, Pressable, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "../../../utils/theme";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
-import { ArrowLeft, RotateCcw, Play } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Play, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 import {
   useFonts,
   Inter_400Regular,
@@ -19,15 +20,19 @@ import {
   Inter_600SemiBold,
   Inter_700Bold,
 } from "@expo-google-fonts/inter";
-import { supabase } from "../../../utils/supabase"; // 🔒 Supabase client (direct, no /api)
+import { supabase } from "../../../utils/supabase";
 
 const { width: screenWidth } = Dimensions.get("window");
 
-// ───────────────────────────────────────────────────────────────────────────────
-// GAME CONSTANTS (unchanged)
-const GAME_DURATION = 60; // seconds
-const MOLE_SHOW_TIME = 475; // ms visible
-const MOLE_SPAWN_INTERVAL = { min: 350, max: 475 }; // ms between spawns
+/** Tweaks to make it more “whackable” */
+const GAME_DURATION = 60;              // seconds
+const MOLE_SHOW_TIME = 650;            // ms visible (↑ from 475)
+const MOLE_SPAWN_INTERVAL = {          // ms between spawns
+  min: 550,
+  max: 800,
+};
+const TAP_GRACE_MS = 150;              // ms after mole hides where a tap still counts
+const HIT_SLOP = { top: 12, bottom: 12, left: 12, right: 12 };
 
 export default function WhackATapGame() {
   const insets = useSafeAreaInsets();
@@ -35,14 +40,24 @@ export default function WhackATapGame() {
 
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const gameIdRef = useRef(null);
+  const sessionIdRef = useRef(null);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // TRACK PLAYER + GAME ID (kept as-is, with start/end hooks)
+  const activeRef = useRef(false);
+  const submittedRef = useRef(false);
+
+  // Achievements modal
+  const [showAchievements, setShowAchievements] = useState(false);
+
+  // For pausing/resuming when opening achievements
+  const prevStateRef = useRef("waiting");
+  const pausedRef = useRef(false);
+
   useEffect(() => {
     (async () => {
       try {
         const savedPlayerId = await AsyncStorage.getItem("puzzle_hub_player_id");
-        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId) : 1);
+        setCurrentPlayerId(savedPlayerId ? parseInt(savedPlayerId, 10) : 1);
       } catch {
         setCurrentPlayerId(1);
       }
@@ -51,24 +66,28 @@ export default function WhackATapGame() {
 
   useEffect(() => {
     let mounted = true;
-    let currentGameId = null;
     (async () => {
       if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.WHACK_A_TAP);
-      if (id && mounted) {
-        currentGameId = id;
+      try {
+        const id = await getGameId(GAME_TYPES.WHACK_A_TAP);
+        if (!mounted || !id) return;
         setGameId(id);
+        gameIdRef.current = id;
+
         try {
-          await gameTracker.startGame(id, currentPlayerId);
+          const sessionId = await gameTracker.startGame(id, currentPlayerId);
+          sessionIdRef.current = sessionId || id;
+          activeRef.current = true;
+          submittedRef.current = false;
         } catch {}
-      }
+      } catch {}
     })();
     return () => {
       mounted = false;
-      if (currentGameId) {
-        try {
-          gameTracker.endGame(currentGameId, 0);
-        } catch {}
+      if (sessionIdRef.current && activeRef.current && !submittedRef.current) {
+        try { gameTracker.endGame(sessionIdRef.current, 0, { cancelled: true, reason: "unmount" }); } catch {}
+        submittedRef.current = true;
+        activeRef.current = false;
       }
     };
   }, [currentPlayerId]);
@@ -80,8 +99,7 @@ export default function WhackATapGame() {
     Inter_700Bold,
   });
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // GAME STATE (unchanged gameplay)
+  // ── GAME STATE
   const [gameState, setGameState] = useState("waiting"); // waiting | playing | gameover
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
@@ -90,20 +108,20 @@ export default function WhackATapGame() {
   const [activeMole, setActiveMole] = useState(null);
   const [tappedMole, setTappedMole] = useState(null);
 
-  // Refs
+  // Refs for speed & reliability
   const gameStateRef = useRef(gameState);
   const runIdRef = useRef(0);
   const mountedRef = useRef(true);
   const gameTimerRef = useRef(null);
   const spawnTimerRef = useRef(null);
   const hideTimerRef = useRef(null);
-
-  // NEW: session start timestamp per run
   const sessionStartRef = useRef(null);
 
-  useEffect(() => {
-    gameStateRef.current = gameState;
-  }, [gameState]);
+  // live “active mole” + “last mole” refs for grace window
+  const activeMoleRef = useRef(null);
+  const lastMoleRef = useRef({ index: null, at: 0 });
+
+  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
 
   useEffect(() => {
     return () => {
@@ -112,37 +130,30 @@ export default function WhackATapGame() {
     };
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // LOCAL BEST/LAST (kept)
   useEffect(() => {
     (async () => {
       try {
         const saved = await AsyncStorage.getItem("whack_a_tap_scores");
         if (saved) {
-          const { best, last } = JSON.parse(saved);
-          setBestScore(best || 0);
-          setLastScore(last || 0);
+          const { best = 0, last = 0 } = JSON.parse(saved);
+          setBestScore(best);
+          setLastScore(last);
         }
       } catch {}
     })();
   }, []);
 
   const saveScores = useCallback(async (best, last) => {
-    try {
-      await AsyncStorage.setItem("whack_a_tap_scores", JSON.stringify({ best, last }));
-    } catch {}
+    try { await AsyncStorage.setItem("whack_a_tap_scores", JSON.stringify({ best, last })); } catch {}
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // PERSISTENCE HELPERS (NEW — Supabase only, no API routes)
-
+  // Optional persistence (kept as-is)
   const insertGameSession = useCallback(
     async ({ startMs, endMs, finalScore, result }) => {
       if (!currentPlayerId || !gameId) return;
       const startIso = new Date(startMs || Date.now()).toISOString();
       const endIso = new Date(endMs || Date.now()).toISOString();
       const duration = Math.max(0, Math.floor(((endMs || Date.now()) - (startMs || Date.now())) / 1000));
-
       try {
         await supabase.from("game_sessions").insert({
           player_id: currentPlayerId,
@@ -151,11 +162,9 @@ export default function WhackATapGame() {
           end_time: endIso,
           duration,
           score: Number(finalScore || 0),
-          meta: { result }, // "win" | "loss" | "exit"
+          meta: { result },
         });
-      } catch (e) {
-        // swallow; no UI changes if offline
-      }
+      } catch {}
     },
     [currentPlayerId, gameId]
   );
@@ -170,10 +179,8 @@ export default function WhackATapGame() {
           .eq("player_id", currentPlayerId)
           .eq("game_id", gameId)
           .maybeSingle();
-
         if (error) throw error;
         const currentHigh = data?.high_score ?? 0;
-
         if (Number(newScore) > Number(currentHigh)) {
           await supabase.from("player_game_stats").upsert({
             player_id: currentPlayerId,
@@ -181,28 +188,16 @@ export default function WhackATapGame() {
             high_score: Number(newScore),
           });
         }
-      } catch (e) {
-        // ignore if offline; can be retried later by a global queue if you add one
-      }
+      } catch {}
     },
     [currentPlayerId, gameId]
   );
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // TIMER HELPERS (unchanged)
+  // ── TIMERS
   const clearAllTimers = useCallback(() => {
-    if (gameTimerRef.current) {
-      clearInterval(gameTimerRef.current);
-      gameTimerRef.current = null;
-    }
-    if (spawnTimerRef.current) {
-      clearTimeout(spawnTimerRef.current);
-      spawnTimerRef.current = null;
-    }
-    if (hideTimerRef.current) {
-      clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = null;
-    }
+    if (gameTimerRef.current) { clearInterval(gameTimerRef.current); gameTimerRef.current = null; }
+    if (spawnTimerRef.current) { clearTimeout(spawnTimerRef.current); spawnTimerRef.current = null; }
+    if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
   }, []);
 
   const randomDelay = () =>
@@ -211,44 +206,51 @@ export default function WhackATapGame() {
 
   const scheduleNextSpawn = useCallback((delayMs) => {
     if (!mountedRef.current) return;
-    if (spawnTimerRef.current) {
-      clearTimeout(spawnTimerRef.current);
-      spawnTimerRef.current = null;
-    }
+    if (spawnTimerRef.current) { clearTimeout(spawnTimerRef.current); spawnTimerRef.current = null; }
     spawnTimerRef.current = setTimeout(() => {
       spawnMoleSafe();
     }, delayMs);
   }, []);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // SPAWN MOLE (unchanged)
   const spawnMoleSafe = useCallback(() => {
     if (!mountedRef.current) return;
     if (gameStateRef.current !== "playing") return;
 
     const thisRun = runIdRef.current;
     const hole = Math.floor(Math.random() * 9);
+
     setActiveMole(hole);
+    activeMoleRef.current = hole;
     setTappedMole(null);
 
-    if (hideTimerRef.current) {
-      clearTimeout(hideTimerRef.current);
-      hideTimerRef.current = null;
-    }
-    hideTimerRef.current = setTimeout(() => {
-      if (!mountedRef.current) return;
-      if (runIdRef.current !== thisRun) return;
-      if (gameStateRef.current !== "playing") return;
+    if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
 
+    hideTimerRef.current = setTimeout(() => {
+      if (!mountedRef.current || runIdRef.current !== thisRun || gameStateRef.current !== "playing") return;
+
+      // Record last mole for grace taps
+      lastMoleRef.current = { index: activeMoleRef.current, at: Date.now() };
       setActiveMole(null);
+      activeMoleRef.current = null;
       setTappedMole(null);
+
       scheduleNextSpawn(randomDelay());
     }, MOLE_SHOW_TIME);
   }, [scheduleNextSpawn]);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // START A NEW GAME (unchanged gameplay; + set session start)
-  const startNewGame = useCallback(() => {
+  // ── START
+  const startNewGame = useCallback(async () => {
+    if (!activeRef.current || submittedRef.current) {
+      if (gameIdRef.current && currentPlayerId) {
+        try {
+          const newSessionId = await gameTracker.startGame(gameIdRef.current, currentPlayerId);
+          sessionIdRef.current = newSessionId || gameIdRef.current;
+          activeRef.current = true;
+          submittedRef.current = false;
+        } catch {}
+      }
+    }
+
     runIdRef.current += 1;
     clearAllTimers();
 
@@ -256,66 +258,66 @@ export default function WhackATapGame() {
     setScore(0);
     setTimeLeft(GAME_DURATION);
     setActiveMole(null);
+    activeMoleRef.current = null;
     setTappedMole(null);
+    lastMoleRef.current = { index: null, at: 0 };
 
-    // NEW: mark session start
     sessionStartRef.current = Date.now();
 
-    // countdown
     gameTimerRef.current = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) return 0;
-        return prev - 1;
-      });
+      setTimeLeft((prev) => (prev <= 1 ? 0 : prev - 1));
     }, 1000);
 
-    // first mole after 800ms (same feel)
-    scheduleNextSpawn(800);
-  }, [clearAllTimers, scheduleNextSpawn]);
+    // small lead-in so players are ready
+    scheduleNextSpawn(700);
+  }, [clearAllTimers, scheduleNextSpawn, currentPlayerId]);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // TAP HANDLER (unchanged)
+  // ── TAP
   const handleHoleTap = useCallback(
     (holeIndex) => {
       if (gameStateRef.current !== "playing") return;
-      if (activeMole !== holeIndex) return;
 
-      try {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      } catch {}
+      const now = Date.now();
+      const isActive = activeMoleRef.current === holeIndex;
+      const inGrace =
+        lastMoleRef.current.index === holeIndex &&
+        now - lastMoleRef.current.at <= TAP_GRACE_MS;
+
+      if (!isActive && !inGrace) return;
+
+      try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); } catch {}
 
       setScore((s) => s + 1);
       setTappedMole(holeIndex);
 
-      if (hideTimerRef.current) {
-        clearTimeout(hideTimerRef.current);
-        hideTimerRef.current = null;
-      }
+      if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
+
+      // Lock out double taps on same mole quickly
+      activeMoleRef.current = null;
+      setActiveMole(null);
 
       setTimeout(() => {
-        if (!mountedRef.current) return;
-        setActiveMole(null);
+        if (!mountedRef.current || gameStateRef.current !== "playing") return;
         setTappedMole(null);
         scheduleNextSpawn(randomDelay());
-      }, 250);
+      }, 220);
     },
-    [activeMole, scheduleNextSpawn]
+    [scheduleNextSpawn]
   );
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // END GAME WHEN TIME HITS 0 (unchanged UX; + persistence)
+  // ── END WHEN TIME HITS 0
   useEffect(() => {
     if (timeLeft === 0 && gameState === "playing") {
       runIdRef.current += 1;
       clearAllTimers();
       setGameState("gameover");
       setActiveMole(null);
+      activeMoleRef.current = null;
       setTappedMole(null);
 
       const finalScore = score;
       setLastScore(finalScore);
 
-      // local cache
       if (finalScore > bestScore) {
         setBestScore(finalScore);
         saveScores(finalScore, finalScore);
@@ -323,25 +325,21 @@ export default function WhackATapGame() {
         saveScores(bestScore, finalScore);
       }
 
-      // NEW: persistence
       const startMs = sessionStartRef.current || Date.now();
       const endMs = Date.now();
-      insertGameSession({ startMs, endMs, finalScore, result: "win" });
+      insertGameSession({ startMs, endMs, finalScore, result: "play" });
       updateHighScoreIfBetter(finalScore);
 
-      if (gameId) {
-        try {
-          gameTracker.endGame(gameId, finalScore * 5);
-        } catch {}
+      if (sessionIdRef.current && activeRef.current && !submittedRef.current) {
+        try { gameTracker.endGame(sessionIdRef.current, finalScore, { result: "play" }); } catch {}
+        submittedRef.current = true;
+        activeRef.current = false;
       }
 
-      try {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      } catch {}
-
+      try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
       Alert.alert(
         "Time's Up! ⏰",
-        `You whacked ${finalScore} moles!\n${finalScore > bestScore ? "New best score!" : ""}`,
+        `You whacked ${finalScore} moles!${finalScore > bestScore ? " New best score!" : ""}`,
         [
           { text: "Play Again", onPress: startNewGame },
           { text: "Back to Hub", onPress: () => handleExitToHub() },
@@ -353,7 +351,6 @@ export default function WhackATapGame() {
     gameState,
     score,
     bestScore,
-    gameId,
     saveScores,
     startNewGame,
     clearAllTimers,
@@ -361,49 +358,72 @@ export default function WhackATapGame() {
     updateHighScoreIfBetter,
   ]);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // EXIT / BACK HANDLING → submit a "play" (loss)
   const handleExitToHub = useCallback(() => {
-    // If a run is active, mark a loss with current partial score
     const isPlaying = gameStateRef.current === "playing";
     const finalScore = isPlaying ? score : 0;
     const startMs = sessionStartRef.current || Date.now();
     const endMs = Date.now();
 
-    // record loss session (does not touch high score)
-    insertGameSession({ startMs, endMs, finalScore, result: "loss" });
+    insertGameSession({ startMs, endMs, finalScore, result: "exit" });
 
-    // stop timers & reset run id
+    if (sessionIdRef.current && activeRef.current && !submittedRef.current) {
+      try { gameTracker.endGame(sessionIdRef.current, 0, { cancelled: true, reason: "back" }); } catch {}
+      submittedRef.current = true;
+      activeRef.current = false;
+    }
+
     runIdRef.current += 1;
     clearAllTimers();
     setGameState("waiting");
     setActiveMole(null);
+    activeMoleRef.current = null;
     setTappedMole(null);
     setTimeLeft(GAME_DURATION);
     sessionStartRef.current = null;
 
-    // navigate back
     router.back();
   }, [score, insertGameSession, clearAllTimers]);
 
-  // Header back button should submit a loss play
+  // Pause/resume helpers when opening achievements mid-game
+  const pauseIfPlaying = useCallback(() => {
+    if (gameStateRef.current === "playing") {
+      prevStateRef.current = "playing";
+      pausedRef.current = true;
+      clearAllTimers();
+    } else {
+      prevStateRef.current = gameStateRef.current;
+    }
+  }, [clearAllTimers]);
+
+  const resumeIfPaused = useCallback(() => {
+    if (pausedRef.current && prevStateRef.current === "playing" && timeLeft > 0) {
+      pausedRef.current = false;
+      setGameState("playing");
+      // restart timers and spawn schedule quickly
+      if (!gameTimerRef.current) {
+        gameTimerRef.current = setInterval(() => {
+          setTimeLeft((prev) => (prev <= 1 ? 0 : prev - 1));
+        }, 1000);
+      }
+      scheduleNextSpawn(300);
+    }
+  }, [scheduleNextSpawn, timeLeft]);
+
   const onHeaderBackPress = useCallback(() => {
     handleExitToHub();
   }, [handleExitToHub]);
 
-  // Hardware back handler (Android)
   useEffect(() => {
     const sub = BackHandler.addEventListener("hardwareBackPress", () => {
       handleExitToHub();
-      return true; // we handled it
+      return true;
     });
     return () => sub.remove();
   }, [handleExitToHub]);
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // UI UTILS (unchanged)
+  // UI
   const formatTime = useCallback((s) => `${s}s`, []);
-  const holeSize = (screenWidth - 80) / 3 - 16;
+  const holeSize = (screenWidth - 80) / 3 - 12;
 
   if (!fontsLoaded) return null;
 
@@ -413,52 +433,37 @@ export default function WhackATapGame() {
       <NightSkyBackground />
 
       {/* Header */}
-      <View
-        style={{
-          paddingTop: insets.top + 16,
-          paddingHorizontal: 20,
-          marginBottom: 20,
-        }}
-      >
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 16,
-          }}
-        >
+      <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, marginBottom: 20 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
           <TouchableOpacity
             onPress={onHeaderBackPress}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
+            style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
           >
             <ArrowLeft size={24} color={colors.text} />
           </TouchableOpacity>
 
-          <Text
-            style={{
-              fontFamily: "Inter_700Bold",
-              fontSize: 20,
-              color: colors.text,
-            }}
-          >
+          <Text style={{ fontFamily: "Inter_700Bold", fontSize: 20, color: colors.text }}>
             Whack-A-Tap
           </Text>
 
-          <TouchableOpacity
-            onPress={startNewGame}
-            style={{
-              padding: 8,
-              borderRadius: 12,
-              backgroundColor: colors.glassSecondary,
-            }}
-          >
-            <RotateCcw size={24} color={colors.text} />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TouchableOpacity
+              onPress={() => {
+                pauseIfPlaying();
+                setShowAchievements(true);
+              }}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={startNewGame}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <RotateCcw size={24} color={colors.text} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* Stats */}
@@ -474,81 +479,30 @@ export default function WhackATapGame() {
               padding: 16,
             }}
           >
-            <View
-              style={{
-                flexDirection: "row",
-                justifyContent: "space-around",
-                alignItems: "center",
-              }}
-            >
+            <View style={{ flexDirection: "row", justifyContent: "space-around", alignItems: "center" }}>
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
                   Score
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent2 }}>
                   {score}
                 </Text>
               </View>
 
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
                   Best
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: colors.gameAccent2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: colors.gameAccent2 }}>
                   {bestScore}
                 </Text>
               </View>
 
               <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontFamily: "Inter_500Medium",
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_500Medium", fontSize: 12, color: colors.textSecondary, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
                   Time
                 </Text>
-                <Text
-                  style={{
-                    fontFamily: "Inter_700Bold",
-                    fontSize: 18,
-                    color: timeLeft <= 10 ? "#EF4444" : colors.gameAccent2,
-                  }}
-                >
+                <Text style={{ fontFamily: "Inter_700Bold", fontSize: 18, color: timeLeft <= 10 ? "#EF4444" : colors.gameAccent2 }}>
                   {formatTime(timeLeft)}
                 </Text>
               </View>
@@ -557,16 +511,9 @@ export default function WhackATapGame() {
         </View>
       </View>
 
-      {/* Status line */}
+      {/* Status */}
       <View style={{ paddingHorizontal: 20, marginBottom: 20 }}>
-        <Text
-          style={{
-            fontFamily: "Inter_600SemiBold",
-            fontSize: 16,
-            color: colors.text,
-            textAlign: "center",
-          }}
-        >
+        <Text style={{ fontFamily: "Inter_600SemiBold", fontSize: 16, color: colors.text, textAlign: "center" }}>
           {gameState === "waiting" && "Tap 'Start Game' to begin!"}
           {gameState === "playing" && "Tap the moles as fast as you can!"}
           {gameState === "gameover" && "Game Over!"}
@@ -574,30 +521,15 @@ export default function WhackATapGame() {
       </View>
 
       {/* Grid */}
-      <View
-        style={{
-          flex: 1,
-          paddingHorizontal: 20,
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        <View
-          style={{
-            width: screenWidth - 40,
-            flexDirection: "row",
-            flexWrap: "wrap",
-            gap: 16,
-            justifyContent: "center",
-          }}
-        >
+      <View style={{ flex: 1, paddingHorizontal: 20, justifyContent: "center", alignItems: "center" }}>
+        <View style={{ width: screenWidth - 40, flexDirection: "row", flexWrap: "wrap", gap: 16, justifyContent: "center" }}>
           {Array.from({ length: 9 }).map((_, index) => (
-            <TouchableOpacity
+            <Pressable
               key={index}
               onPress={() => handleHoleTap(index)}
-              activeOpacity={0.7}
+              hitSlop={HIT_SLOP}
               disabled={gameState !== "playing"}
-              style={{
+              style={({ pressed }) => ({
                 width: holeSize,
                 height: holeSize,
                 borderRadius: 12,
@@ -608,12 +540,13 @@ export default function WhackATapGame() {
                 alignItems: "center",
                 position: "relative",
                 opacity: gameState === "playing" ? 1 : 0.5,
+                transform: [{ scale: pressed ? 0.98 : 1 }],
                 shadowColor: "#000",
                 shadowOffset: { width: 0, height: 2 },
                 shadowOpacity: 0.2,
                 shadowRadius: 4,
                 elevation: 4,
-              }}
+              })}
             >
               {activeMole === index ? (
                 <View
@@ -634,29 +567,23 @@ export default function WhackATapGame() {
                     borderColor: tappedMole === index ? "#059669" : "#654321",
                   }}
                 >
-                  <Text
-                    style={{
-                      fontSize: holeSize * 0.3,
-                      color: "white",
-                      textAlign: "center",
-                    }}
-                  >
+                  <Text style={{ fontSize: holeSize * 0.3, color: "white", textAlign: "center" }}>
                     {tappedMole === index ? "✓" : "🐹"}
                   </Text>
                 </View>
               ) : (
                 <View
                   style={{
-                    width: holeSize * 0.4,
-                    height: holeSize * 0.4,
-                    borderRadius: holeSize * 0.2,
+                    width: holeSize * 0.42,
+                    height: holeSize * 0.42,
+                    borderRadius: holeSize * 0.21,
                     backgroundColor: "#1F2937",
                     borderWidth: 2,
                     borderColor: "#374151",
                   }}
                 />
               )}
-            </TouchableOpacity>
+            </Pressable>
           ))}
         </View>
 
@@ -676,18 +603,80 @@ export default function WhackATapGame() {
             }}
           >
             <Play size={20} color="white" />
-            <Text
-              style={{
-                fontFamily: "Inter_700Bold",
-                fontSize: 16,
-                color: "white",
-              }}
-            >
+            <Text style={{ fontFamily: "Inter_700Bold", fontSize: 16, color: "white" }}>
               Start Game
             </Text>
           </TouchableOpacity>
         )}
       </View>
+
+      {/* Achievements modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setShowAchievements(false);
+          resumeIfPaused();
+        }}
+        onDismiss={resumeIfPaused}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", paddingHorizontal: 16 }}>
+          <View
+            style={{
+              borderRadius: 16,
+              overflow: "hidden",
+              borderWidth: 1,
+              borderColor: "rgba(255,255,255,0.15)",
+              backgroundColor: "rgba(0,0,0,0.9)",
+              maxHeight: "80%",
+            }}
+          >
+            <View
+              style={{
+                paddingHorizontal: 16,
+                paddingVertical: 12,
+                borderBottomWidth: 1,
+                borderBottomColor: "rgba(255,255,255,0.12)",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <Text style={{ fontWeight: "700", fontSize: 16, color: "#fff" }}>
+                Whack-A-Tap Achievements
+              </Text>
+              <TouchableOpacity
+                onPress={() => { setShowAchievements(false); resumeIfPaused(); }}
+                hitSlop={10}
+              >
+                <Text style={{ fontWeight: "600", fontSize: 14, color: "rgba(255,255,255,0.75)" }}>
+                  Close
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={{ padding: 12 }}>
+              {currentPlayerId != null && (gameIdRef.current ?? gameId) != null ? (
+                <AchievementsSection
+                  key={`${(gameIdRef.current ?? gameId)}-${currentPlayerId}`}
+                  playerId={currentPlayerId}
+                  gameId={gameIdRef.current ?? gameId}
+                  autoRefreshMs={15000}
+                  showSearchBar
+                  showFilters
+                />
+              ) : (
+                <View style={{ padding: 16 }}>
+                  <Text style={{ color: "rgba(255,255,255,0.75)", textAlign: "center", fontWeight: "500" }}>
+                    Loading achievements…
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <View style={{ height: insets.bottom + 20 }} />
     </View>

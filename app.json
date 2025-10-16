@@ -2,37 +2,54 @@
   "expo": {
     "name": "Game Void",
     "slug": "game-void",
-    "version": "1.1.0",
+    "version": "1.37",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "userInterfaceStyle": "automatic",
+    "jsEngine": "hermes",
     "newArchEnabled": true,
+    "scheme": "gamevoid",
+
+    "assetBundlePatterns": ["assets/**"],
+
     "ios": {
       "bundleIdentifier": "com.createinc.6a9a88925dfd40fd95d12c13e2b26983",
       "buildNumber": "1",
       "supportsTablet": true,
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSUserTrackingUsageDescription": "We use your device identifier to show relevant ads that help keep Game Void free.",
       }
     },
+
     "android": {
+      "package": "com.andysocial.gamevoid0",
+      "versionCode": 30,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
       "permissions": [
-        "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "WAKE_LOCK",
+        "com.google.android.gms.permission.AD_ID"
       ],
-      "package": "xyz.create.CreateExpoEnvironment"
-    },
-    "plugins": [
-      [
-        "expo-router",
+      "intentFilters": [
         {
-          "sitemap": false
+          "action": "VIEW",
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [{ "scheme": "gamevoid" }]
         }
-      ],
+      ]
+    },
+
+    "plugins": [
+      "expo-font",
+      "expo-av",
+      "expo-secure-store",
+      "expo-web-browser",
+      "expo-tracking-transparency",
       [
         "expo-splash-screen",
         {
@@ -41,39 +58,29 @@
           "resizeMode": "contain"
         }
       ],
-      "expo-audio",
       [
-        "expo-build-properties",
+        "react-native-google-mobile-ads",
         {
-          "ios": {
-            "useFrameworks": "static"
-          }
+          "iosAppId": "ca-app-pub-1505977777207758~9116413742",
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713"
         }
       ],
-      "expo-video",
-      "expo-font",
-      "expo-secure-store",
-      "expo-web-browser"
+      ["expo-router", {}]
     ],
+
     "web": {
       "bundler": "metro",
       "favicon": "./assets/images/favicon.png"
     },
-    "experiments": {
-      "typedRoutes": true
-    },
+
+    "experiments": { "typedRoutes": true },
+    "runtimeVersion": "1.37",
+
+    "platforms": ["ios", "android", "web"],
+
     "extra": {
-      "router": {
-        "origin": false
-      }
-    },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "platforms": [
-      "ios",
-      "android",
-      "web"
-    ]
+      "router": { "sitemap": false },
+      "eas": { "projectId": "b15cef5b-86a6-4812-8cd3-31412cf4c277" }
+    }
   }
 }

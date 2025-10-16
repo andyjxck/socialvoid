@@ -15,15 +15,15 @@ const ControlButton = ({ onPress, label }) => {
         backgroundColor: colors.gameCard2,
         justifyContent: "center",
         alignItems: "center",
-        borderWidth: 1.5,
-        borderColor: colors.gameAccent2,
-        opacity: 0.8,
+        borderWidth: 3,
+        borderColor: colors.gameAccent1,
+        opacity: 0.6,
       }}
     >
       <Text
         style={{
           fontFamily: "Inter_700Bold",
-          fontSize: 14,
+          fontSize: 20,
           color: colors.text,
         }}
       >

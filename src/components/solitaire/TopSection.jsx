@@ -6,29 +6,35 @@ import { useTheme } from "../../utils/theme";
 import { Card } from "./Card";
 import { CARD_WIDTH, CARD_HEIGHT } from "../../utils/solitaire/constants";
 
+/**
+ * Props:
+ * - game
+ * - onStockPress
+ * - onCardPress
+ * - onEmptySpacePress
+ * - onCardDoublePress
+ * - isSelected
+ * - registerDropZone(type, index, layout)    // optional
+ * - beginDrag(card, source, cardIndex)       // optional
+ */
 export const TopSection = ({
   game,
   onStockPress,
   onCardPress,
   onEmptySpacePress,
-  onCardDoublePress, // New prop for double-tap functionality
+  onCardDoublePress,
   isSelected,
+  registerDropZone,
+  beginDrag,
 }) => {
   const { colors, isDark } = useTheme();
 
+  const wasteTopIndex = game.waste.length - 1;
+  const wasteTop = wasteTopIndex >= 0 ? game.waste[wasteTopIndex] : null;
+
   return (
-    <View
-      style={{
-        paddingHorizontal: 20,
-        marginBottom: 20,
-      }}
-    >
-      <View
-        style={{
-          borderRadius: 16,
-          overflow: "hidden",
-        }}
-      >
+    <View style={{ paddingHorizontal: 20, marginBottom: 20 }}>
+      <View style={{ borderRadius: 16, overflow: "hidden" }}>
         <BlurView
           intensity={isDark ? 40 : 60}
           tint={isDark ? "dark" : "light"}
@@ -49,7 +55,7 @@ export const TopSection = ({
               alignItems: "flex-start",
             }}
           >
-            {/* Stock & Waste - Reduced width */}
+            {/* Stock & Waste */}
             <View style={{ flexDirection: "row", gap: 8 }}>
               <View style={{ alignItems: "center" }}>
                 {/* Draw Button */}
@@ -89,11 +95,7 @@ export const TopSection = ({
                 >
                   {game.stock.length > 0 ? (
                     <>
-                      <Card
-                        card={{ faceUp: false }}
-                        isSelected={false}
-                        onPress={() => {}}
-                      />
+                      <Card card={{ faceUp: false }} isSelected={false} />
                       <View
                         style={{
                           position: "absolute",
@@ -137,8 +139,13 @@ export const TopSection = ({
                 </TouchableOpacity>
               </View>
 
-              {/* Waste pile - reduced width and better positioning */}
-              <View style={{ width: CARD_WIDTH + 12, position: "relative" }}>
+              {/* Waste pile */}
+              <View
+                style={{ width: CARD_WIDTH + 12, position: "relative" }}
+                onLayout={(e) =>
+                  registerDropZone?.("waste", 0, e.nativeEvent.layout)
+                }
+              >
                 {game.waste.length > 0 ? (
                   game.waste.slice(-3).map((card, index, arr) => (
                     <Card
@@ -155,21 +162,28 @@ export const TopSection = ({
                           : undefined
                       }
                       onDoublePress={
-                        index === arr.length - 1 // Only top waste card can be double-tapped
+                        index === arr.length - 1
                           ? () =>
                               onCardDoublePress(
                                 card,
-                                {
-                                  type: "waste",
-                                  column: game.waste,
-                                },
-                                game.waste.length - 1,
+                                { type: "waste", column: game.waste },
+                                game.waste.length - 1
+                              )
+                          : undefined
+                      }
+                      onLongPress={
+                        index === arr.length - 1
+                          ? () =>
+                              beginDrag?.(
+                                card,
+                                { type: "waste", column: game.waste },
+                                game.waste.length - 1
                               )
                           : undefined
                       }
                       style={{
                         position: index === 0 ? "relative" : "absolute",
-                        left: index * 6, // Reduced overlap
+                        left: index * 6,
                         zIndex: index,
                         opacity: index === arr.length - 1 ? 1 : 0.7,
                       }}
@@ -181,7 +195,7 @@ export const TopSection = ({
               </View>
             </View>
 
-            {/* Safe Zone (Foundations) - Better labeled and spaced */}
+            {/* Safe Zone (Foundations) */}
             <View style={{ alignItems: "center" }}>
               <View
                 style={{
@@ -208,12 +222,20 @@ export const TopSection = ({
                     key={index}
                     activeOpacity={0.8}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    onLayout={(e) =>
+                      registerDropZone?.(
+                        "foundation",
+                        index,
+                        e.nativeEvent.layout
+                      )
+                    }
                     onPress={() => {
                       if (foundation.length > 0) {
-                        onCardPress(foundation[foundation.length - 1], {
-                          type: "foundation",
-                          column: foundation,
-                        });
+                        onCardPress(
+                          foundation[foundation.length - 1],
+                          { type: "foundation", column: foundation },
+                          foundation.length - 1
+                        );
                       } else {
                         onEmptySpacePress(foundation, "foundation");
                       }
@@ -223,8 +245,22 @@ export const TopSection = ({
                       <Card
                         card={foundation[foundation.length - 1]}
                         isSelected={isSelected(
-                          foundation[foundation.length - 1],
+                          foundation[foundation.length - 1]
                         )}
+                        onDoublePress={() =>
+                          onCardDoublePress(
+                            foundation[foundation.length - 1],
+                            { type: "foundation", column: foundation },
+                            foundation.length - 1
+                          )
+                        }
+                        onLongPress={() =>
+                          beginDrag?.(
+                            foundation[foundation.length - 1],
+                            { type: "foundation", column: foundation },
+                            foundation.length - 1
+                          )
+                        }
                       />
                     ) : (
                       <View

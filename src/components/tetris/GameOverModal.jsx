@@ -1,14 +1,26 @@
+// components/tetris/GameOverModal.jsx  (REPLACE ENTIRE FILE)
 import React from "react";
 import { View, Text, TouchableOpacity } from "react-native";
 import { BlurView } from "expo-blur";
 import { useTheme } from "../../utils/theme";
 import { router } from "expo-router";
 
-export default function GameOverModal({ score, lines, onPlayAgain }) {
+export default function GameOverModal({
+  score = 0,
+  lines = 0,
+  onPlayAgain,          // preferred
+  onRestart,            // alias
+  onReplay,             // alias
+}) {
   const { colors, isDark } = useTheme();
+
+  // Pick the first available handler
+  const handlePlayAgain =
+    onPlayAgain || onRestart || onReplay || (() => {});
 
   return (
     <View
+      // Fullscreen overlay above the game
       style={{
         position: "absolute",
         top: 0,
@@ -19,11 +31,17 @@ export default function GameOverModal({ score, lines, onPlayAgain }) {
         justifyContent: "center",
         alignItems: "center",
       }}
+      pointerEvents="auto"
     >
-      <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
+      <View
+        style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}
+        // Ensure this view starts a responder chain so touches don't get eaten
+        onStartShouldSetResponder={() => true}
+      >
         <BlurView
           intensity={isDark ? 80 : 100}
           tint={isDark ? "dark" : "light"}
+          pointerEvents="auto"
           style={{
             backgroundColor: isDark
               ? "rgba(31, 41, 55, 0.9)"
@@ -55,7 +73,7 @@ export default function GameOverModal({ score, lines, onPlayAgain }) {
               marginBottom: 8,
             }}
           >
-            Score: {score.toLocaleString()}
+            Score: {Number(score || 0).toLocaleString()}
           </Text>
 
           <Text
@@ -66,12 +84,17 @@ export default function GameOverModal({ score, lines, onPlayAgain }) {
               marginBottom: 20,
             }}
           >
-            Lines: {lines}
+            Lines: {lines ?? 0}
           </Text>
 
           <View style={{ flexDirection: "row", gap: 12 }}>
             <TouchableOpacity
-              onPress={onPlayAgain}
+              onPress={() => {
+                // surface in logs so we know tap is received
+                try { console.log("▶️ Play Again pressed"); } catch {}
+                try { handlePlayAgain(); } catch (e) { try { console.warn(e); } catch {} }
+              }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               style={{
                 backgroundColor: colors.secondaryButton,
                 paddingHorizontal: 20,
@@ -92,6 +115,7 @@ export default function GameOverModal({ score, lines, onPlayAgain }) {
 
             <TouchableOpacity
               onPress={() => router.back()}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               style={{
                 backgroundColor: colors.primaryButton,
                 paddingHorizontal: 20,

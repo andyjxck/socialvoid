@@ -1,4 +1,4 @@
-// src/components/friends/PlayerCard.jsx
+// mobile/src/components/friends/PlayerCard.jsx
 import React from "react";
 import { View, Text, TouchableOpacity } from "react-native";
 import { BlurView } from "expo-blur";
@@ -30,17 +30,34 @@ const fmtPlay = (s) => {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
 
+/**
+ * Props:
+ *  - player: { id (players.id), user_id (required), username?, profile_emoji?, total_points?, last_seen? }
+ *  - isFriend (bool)
+ *  - isPending (bool)
+ *  - disableAdd (bool)
+ *  - onAddFriend(number user_id)
+ *  - onRemoveFriend(playerId, username)
+ *  - onChat(player)
+ *  - isAddingFriend (bool)
+ *  - isOnline (bool)         <-- shows green dot (friends only)
+ *  - unreadCount (number)    <-- red badge on chat button if > 0
+ */
 export default function PlayerCard({
   player,
   isFriend = false,
+  isPending = false,
+  disableAdd = false,
   onAddFriend,
   onRemoveFriend,
   onChat,
-  isAddingFriend,
+  isAddingFriend = false,
+  isOnline = false,
+  unreadCount = 0,
 }) {
   const { colors, isDark } = useTheme();
 
-  // Fonts: keep hooks order stable
+  // Fonts
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -52,39 +69,22 @@ export default function PlayerCard({
   const F600 = fontsLoaded ? "Inter_600SemiBold" : undefined;
   const F700 = fontsLoaded ? "Inter_700Bold" : undefined;
 
-  // Accept either players.id or user_id (string/uuid); DON'T coerce
-  const hintedPlayerId = player?.id ?? player?.player_id ?? null;
-  const userIdRaw = player?.user_id ?? null;
+  // Prefer what we were passed; fall back to lookups to stay robust.
+  const passedPid = Number(player?.id) || null;
+  const userIdInt = Number(player?.user_id);
+  const hasValidUserId = Number.isFinite(userIdInt) && userIdInt > 0;
 
-  /* 1) If we only have user_id, resolve players.id */
-  const { data: resolvedId } = useQuery({
-    queryKey: ["players:resolve-id", userIdRaw],
-    enabled: !hintedPlayerId && !!userIdRaw,
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("players")
-        .select("id")
-        .eq("user_id", userIdRaw)
-        .limit(1)
-        .maybeSingle();
-      if (error) throw error;
-      return data?.id ?? null;
-    },
-    staleTime: 60_000,
-  });
-
-  const playerId = hintedPlayerId ?? resolvedId ?? null;
-
-  /* 2) Fetch the authoritative player row
-        We rely on this for: total_points, total_playtime_seconds, username, emoji */
+  // Resolve player row by user_id (for stable display + totals)
   const { data: playerRow } = useQuery({
-    queryKey: ["players:row", playerId],
-    enabled: !!playerId,
+    queryKey: ["players:by-user_id", userIdInt],
+    enabled: hasValidUserId,
     queryFn: async () => {
       const { data, error } = await supabase
         .from("players")
-        .select("id, username, profile_emoji, user_id, total_points, total_playtime_seconds")
-        .eq("id", playerId)
+        .select(
+          "id, user_id, username, profile_emoji, total_points, total_playtime_seconds"
+        )
+        .eq("user_id", userIdInt)
         .maybeSingle();
       if (error) throw error;
       return data || null;
@@ -92,26 +92,29 @@ export default function PlayerCard({
     staleTime: 60_000,
   });
 
-  /* 3) Pull raw stats for Top 3 and resolve game names via a second query (safe even if no FK set) */
+  // Use the passed players.id first; else use the resolved one for stats
+  const playerPid = passedPid || Number(playerRow?.id) || null;
+
+  /* Top game stats (attach names) — requires players.id */
   const { data: topGameStats = [] } = useQuery({
-    queryKey: ["player-stats-with-game-names", playerId],
-    enabled: !!playerId,
+    queryKey: ["player-stats-with-game-names", playerPid],
+    enabled: !!playerPid,
     queryFn: async () => {
-      // a) raw stats rows for this player
       const { data: rawStats, error: sErr } = await supabase
         .from("player_game_stats")
         .select("game_id,total_plays,total_playtime_seconds")
-        .eq("player_id", playerId);
+        .eq("player_id", playerPid);
       if (sErr) throw sErr;
 
       const rows = rawStats ?? [];
       if (rows.length === 0) return [];
 
-      // b) fetch names for those game_ids
       const gameIds = Array.from(
         new Set(rows.map((r) => r.game_id).filter((x) => x != null))
       );
-      if (gameIds.length === 0) return rows.map((r) => ({ ...r, game_name: "Unknown" }));
+      if (gameIds.length === 0) {
+        return rows.map((r) => ({ ...r, game_name: "Unknown" }));
+      }
 
       const { data: gameRows, error: gErr } = await supabase
         .from("games")
@@ -120,8 +123,6 @@ export default function PlayerCard({
       if (gErr) throw gErr;
 
       const nameById = new Map((gameRows ?? []).map((g) => [g.id, g.name]));
-
-      // c) attach game_name
       return rows.map((r) => ({
         game_id: r.game_id,
         total_plays: r.total_plays ?? 0,
@@ -132,15 +133,15 @@ export default function PlayerCard({
     staleTime: 60_000,
   });
 
-  /* 4) Achievements count (already working) */
+  /* Achievements count — requires players.id */
   const { data: completedAchCount = 0 } = useQuery({
-    queryKey: ["player_achievements:completed-count", playerId],
-    enabled: !!playerId,
+    queryKey: ["player_achievements:completed-count", playerPid],
+    enabled: !!playerPid,
     queryFn: async () => {
       const { count, error } = await supabase
         .from("player_achievements")
         .select("id", { count: "exact", head: true })
-        .eq("player_id", playerId)
+        .eq("player_id", playerPid)
         .eq("is_completed", true);
       if (error) throw error;
       return count ?? 0;
@@ -148,13 +149,14 @@ export default function PlayerCard({
     staleTime: 60_000,
   });
 
-  /* 5) Derived values for display (with safe fallbacks) */
+  /* Derived display */
   const headerUsername =
     playerRow?.username ||
     player?.username ||
-    (userIdRaw ? `Player ${String(userIdRaw).slice(-6)}` : "Player");
+    (hasValidUserId ? `Player ${userIdInt}` : "Player");
 
-  const headerEmoji = playerRow?.profile_emoji || player?.profile_emoji || "🧩";
+  const headerEmoji =
+    playerRow?.profile_emoji || player?.profile_emoji || "🧩";
 
   const totalPoints =
     Number(playerRow?.total_points) ??
@@ -164,14 +166,13 @@ export default function PlayerCard({
   const totalPlaytimeSeconds =
     Number(playerRow?.total_playtime_seconds) ??
     Number(player?.total_playtime_seconds) ??
-    // fallback to sum of rows if player row missing aggregated total
-    topGameStats.reduce(
-      (sum, r) => sum + (Number(r.total_playtime_seconds) || 0),
-      0
-    ) ??
-    0;
+    (Array.isArray(topGameStats)
+      ? topGameStats.reduce(
+          (sum, r) => sum + (Number(r.total_playtime_seconds) || 0),
+          0
+        )
+      : 0);
 
-  // Top 3 games by playtime
   const top3 = React.useMemo(() => {
     if (!Array.isArray(topGameStats) || topGameStats.length === 0) return [];
     return [...topGameStats]
@@ -182,11 +183,23 @@ export default function PlayerCard({
       .slice(0, 3);
   }, [topGameStats]);
 
-  // Always render 3 slots
   const gameSlots = React.useMemo(
     () => [0, 1, 2].map((i) => top3[i] || null),
     [top3]
   );
+
+  /* Add-friend button state + handler */
+  const canAdd = hasValidUserId && !isFriend && !isAddingFriend && !disableAdd;
+
+  const handleAdd = () => {
+    if (!hasValidUserId) return;
+    onAddFriend?.(userIdInt); // send integer user_id ONLY
+  };
+
+  // Badge content (cap at 99)
+  const badgeText = unreadCount > 99 ? "99+" : String(unreadCount);
+
+  if (!fontsLoaded) return null;
 
   return (
     <View style={{ marginBottom: 12 }}>
@@ -194,9 +207,7 @@ export default function PlayerCard({
         intensity={isDark ? 40 : 60}
         tint={isDark ? "dark" : "light"}
         style={{
-          backgroundColor: isDark
-            ? "rgba(31, 41, 55, 0.6)"
-            : "rgba(255, 255, 255, 0.6)",
+          backgroundColor: isDark ? "rgba(31, 41, 55, 0.6)" : "rgba(255, 255, 255, 0.6)",
           borderRadius: 12,
           padding: 16,
           borderWidth: 1,
@@ -215,9 +226,7 @@ export default function PlayerCard({
           <Text style={{ fontSize: 24 }}>{headerEmoji}</Text>
 
           <View style={{ flex: 1 }}>
-            <View
-              style={{ flexDirection: "row", alignItems: "center", gap: 8 }}
-            >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Text
                 style={{
                   fontSize: 16,
@@ -230,7 +239,20 @@ export default function PlayerCard({
                 {headerUsername}
               </Text>
 
-              {!!userIdRaw && (
+              {/* ONLINE DOT — only if you’re friends */}
+              {isFriend && (
+                <View
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 4,
+                    backgroundColor: isOnline ? "#22C55E" : colors.textSecondary + "66",
+                    marginTop: 2,
+                  }}
+                />
+              )}
+
+              {hasValidUserId && (
                 <View style={{ flexDirection: "row", alignItems: "center" }}>
                   <Hash size={10} color={colors.textSecondary} />
                   <Text
@@ -241,7 +263,7 @@ export default function PlayerCard({
                     }}
                     numberOfLines={1}
                   >
-                    {String(userIdRaw)}
+                    {userIdInt}
                   </Text>
                 </View>
               )}
@@ -301,22 +323,7 @@ export default function PlayerCard({
 
           <View style={{ alignItems: "flex-end", gap: 8 }}>
             {!isFriend ? (
-              player?.relationshipStatus === "friend" ? (
-                <View
-                  style={{
-                    backgroundColor: colors.gameAccent1 + "20",
-                    paddingHorizontal: 12,
-                    paddingVertical: 6,
-                    borderRadius: 8,
-                  }}
-                >
-                  <Text
-                    style={{ fontSize: 10, color: colors.gameAccent1, fontFamily: F600 }}
-                  >
-                    Friends
-                  </Text>
-                </View>
-              ) : player?.relationshipStatus === "pending" ? (
+              isPending ? (
                 <View
                   style={{
                     backgroundColor: colors.gameAccent3 + "20",
@@ -333,8 +340,8 @@ export default function PlayerCard({
                 </View>
               ) : (
                 <TouchableOpacity
-                  onPress={() => onAddFriend?.(player)}
-                  disabled={isAddingFriend || !userIdRaw}
+                  onPress={handleAdd}
+                  disabled={!canAdd}
                   style={{
                     backgroundColor: colors.gameAccent1,
                     paddingHorizontal: 12,
@@ -343,7 +350,7 @@ export default function PlayerCard({
                     flexDirection: "row",
                     alignItems: "center",
                     gap: 4,
-                    opacity: !userIdRaw || isAddingFriend ? 0.6 : 1,
+                    opacity: canAdd ? 1 : 0.6,
                   }}
                 >
                   <UserPlus size={12} color="#FFFFFF" />
@@ -354,24 +361,56 @@ export default function PlayerCard({
               )
             ) : (
               <View style={{ flexDirection: "row", gap: 6 }}>
-                <TouchableOpacity
-                  onPress={() => onChat?.(player)}
-                  style={{
-                    backgroundColor: colors.gameAccent2 + "20",
-                    padding: 8,
-                    borderRadius: 8,
-                  }}
-                >
-                  <MessageCircle size={14} color={colors.gameAccent2} />
-                </TouchableOpacity>
+                {/* Chat button with UNREAD BADGE */}
+                <View style={{ position: "relative" }}>
+                  <TouchableOpacity
+                    onPress={() => onChat?.(player)}
+                    style={{
+                      backgroundColor: colors.gameAccent2 + "20",
+                      padding: 8,
+                      borderRadius: 8,
+                    }}
+                  >
+                    <MessageCircle size={14} color={colors.gameAccent2} />
+                  </TouchableOpacity>
+
+                  {unreadCount > 0 && (
+                    <View
+                      style={{
+                        position: "absolute",
+                        top: -2,
+                        right: -2,
+                        minWidth: 16,
+                        height: 16,
+                        paddingHorizontal: 3,
+                        borderRadius: 8,
+                        backgroundColor: "#EF4444",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text
+                        style={{
+                          color: "#fff",
+                          fontSize: 10,
+                          fontFamily: F700,
+                        }}
+                        numberOfLines={1}
+                      >
+                        {badgeText}
+                      </Text>
+                    </View>
+                  )}
+                </View>
 
                 <TouchableOpacity
-                  onPress={() => onRemoveFriend?.(player?.id, player?.username)}
+                  onPress={() => onRemoveFriend?.(playerPid, headerUsername)}
                   style={{
                     backgroundColor: colors.error + "20",
                     padding: 8,
                     borderRadius: 8,
                   }}
+                  disabled={!playerPid}
                 >
                   <UserMinus size={14} color={colors.error} />
                 </TouchableOpacity>

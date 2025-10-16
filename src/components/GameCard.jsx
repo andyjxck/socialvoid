@@ -1,6 +1,19 @@
 // components/GameCard.jsx
-import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, Pressable, Alert } from "react-native";
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
+import {
+  View,
+  Text,
+  Pressable,
+  Alert,
+  Animated,
+  Easing,
+} from "react-native";
 import { router } from "expo-router";
 import { useTheme } from "../utils/theme";
 import { BlurView } from "expo-blur";
@@ -37,21 +50,21 @@ export default function GameCard({ game, playerId, onPress }) {
     Inter_700Bold,
   });
 
-  const [totalSeconds, setTotalSeconds] = useState(0);
+  const [totalPlays, setTotalPlays] = useState(0); // ← pull from player_game_stats
   const [gameId, setGameId] = useState(null);
   const gameName = game?.name || "";
 
+  // ── Spooky season toggle (October) – only adds overlays, no color/text changes ──
+  const isSpookySeason = useMemo(() => {
+    const now = new Date();
+    return now.getMonth() === 9; // October (0-indexed)
+  }, []);
+
   // ---- Formatting ----
-  const formatPlayed = (s) => {
-    const seconds = Math.max(0, Math.floor(Number(s) || 0));
-    if (seconds <= 0) return "Not played yet";
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const sec = seconds % 60;
-    if (h > 0) return `${h}h ${m}m Played`;
-    if (m > 0 && sec > 0) return `${m}m ${sec}s Played`;
-    if (m > 0) return `${m}m Played`;
-    return `${sec}s Played`;
+  const formatPlayed = (plays) => {
+    const n = Math.max(0, Number(plays) || 0);
+    if (n <= 0) return "Not Played Yet";
+    return `Played ${n} ${n === 1 ? "time" : "times"}`;
   };
 
   // ---- Accent & Icon ----
@@ -69,10 +82,8 @@ export default function GameCard({ game, playerId, onPress }) {
     switch (gameType) {
       case "memory_match":
         return <Brain {...iconProps} />;
-      case "tetris":
+      case "blockrise":
         return <Grid3X3 {...iconProps} />;
-      case "chess":
-        return <Target {...iconProps} />;
       case "block_blast":
         return <Zap {...iconProps} />;
       case "water_sort":
@@ -98,8 +109,11 @@ export default function GameCard({ game, playerId, onPress }) {
         return <Zap {...iconProps} />;
       case "dots_and_boxes":
       case "kakuro":
+      case "tictactoe":
+      case "fillthegrid":
         return <Grid3X3 {...iconProps} />;
       case "word_wheel":
+      case "choices":
         return <Brain {...iconProps} />;
       default:
         return <Gamepad2 {...iconProps} />;
@@ -116,64 +130,60 @@ export default function GameCard({ game, playerId, onPress }) {
       .single();
 
     if (error) {
-      console.warn(`[GameCard] Failed to resolve game_id for "${gameName}":`, error);
+      console.warn(
+        `[GameCard] Failed to resolve game_id for "${gameName}":`,
+        error
+      );
       return null;
     }
     return data?.id ?? null;
   }, [gameName]);
 
-  const fetchTotalDuration = useCallback(
+  // Pull total_plays from player_game_stats (same source as profile “Top Games”)
+  const fetchTotalPlays = useCallback(
     async (gid) => {
       if (!playerId || !gid) {
-        setTotalSeconds(0);
+        setTotalPlays(0);
         return;
       }
       const { data, error } = await supabase
-        .from("game_sessions")
-        .select("duration_seconds")
+        .from("player_game_stats")
+        .select("total_plays")
         .eq("player_id", playerId)
-        .eq("game_id", gid);
+        .eq("game_id", gid)
+        .maybeSingle();
 
       if (error) {
         console.warn(
-          `[GameCard] Failed to fetch sessions for player_id=${playerId}, game_id=${gid}:`,
+          `[GameCard] Failed to fetch total_plays for player_id=${playerId}, game_id=${gid}:`,
           error
         );
-        setTotalSeconds(0);
+        setTotalPlays(0);
         return;
       }
 
-      const sum = (data || []).reduce((acc, row) => {
-        const v = Number(row?.duration_seconds) || 0;
-        return acc + (v > 0 ? v : 0);
-        }, 0);
-      setTotalSeconds(sum);
+      setTotalPlays(Number(data?.total_plays) || 0);
     },
     [playerId]
   );
 
-  // Resolve game_id and then fetch total seconds
   const resolveAndFetch = useCallback(async () => {
     const gid = gameId ?? (await fetchGameIdByName());
     if (gid && gid !== gameId) setGameId(gid);
-    await fetchTotalDuration(gid);
-  }, [gameId, fetchGameIdByName, fetchTotalDuration]);
+    await fetchTotalPlays(gid);
+  }, [gameId, fetchGameIdByName, fetchTotalPlays]);
 
-  // Initial load & when game name or playerId changes
   useEffect(() => {
     resolveAndFetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameName, playerId]);
 
-  // Refresh on screen focus (updates after finishing a game and returning)
   useFocusEffect(
     useCallback(() => {
       resolveAndFetch();
-      // no cleanup needed
     }, [resolveAndFetch])
   );
 
-  // ---- Navigation ----
   const handlePress = async () => {
     await Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
@@ -184,25 +194,34 @@ export default function GameCard({ game, playerId, onPress }) {
 
     const gameRoutes = {
       "Memory Match": "games/memory_match",
-      Tetris: "games/tetris",
+      "Block Rise": "games/blockrise",
       2048: "games/2048-fixed",
       "Sliding Puzzle": "games/sliding_puzzle",
-      Chess: "games/chess",
+      Hangman: "games/hangman",
+      "Word Tiles": "games/wordtiles",
       Sudoku: "games/sudoku",
-      "Block Blast": "games/block_blast",
+      Choices: "games/choices",
+      "Block Place": "games/block_blast",
       "Water Sort": "games/water_sort",
       Mancala: "games/mancala",
       "Word Search": "games/word_search",
-      "Flow Connect": "games/flow_connect",
+      "Color Flow": "games/flow_connect",
       Snake: "games/snake",
-      Minesweeper: "games/minesweeper",
-      "Connect Four": "games/connect_4",
+      "Paddle Battle": "games/pong",
+      "Smash Em": "games/smashem",
+      "Stack Em": "games/stackem",
+            "Void Invaders": "games/voidinvaders",
+
+      "Hi-Lo": "games/hilo",
+      "Mine Finder": "games/minesweeper",
+      "Four in a Row": "games/connect_4",
       Solitaire: "games/solitaire",
-      "Simon Says": "games/simon_says",
+      "Fill The Grid": "games/fillthegrid",
+      "Pattern Match": "games/simon_says",
       "Whack-A-Tap": "games/whack_a_tap",
       "Dots & Boxes": "games/dots_and_boxes",
-      Kakuro: "games/kakuro_fixed",
       "Word Wheel": "games/word_wheel",
+      "Tic Tac Toe": "games/tictactoe",
     };
 
     const route = gameRoutes[gameName];
@@ -219,6 +238,122 @@ export default function GameCard({ game, playerId, onPress }) {
   };
 
   if (!fontsLoaded) return null;
+
+  // ───────────────────── Spooky overlays (no color/text changes) ─────────────────────
+  const CobwebCorners = () => {
+    if (!isSpookySeason) return null;
+    const web = (pos) => ({
+      position: "absolute",
+      width: 0,
+      height: 0,
+      borderStyle: "solid",
+      borderRightWidth: 38,
+      borderTopWidth: 38,
+      borderRightColor: "transparent",
+      borderTopColor: "rgba(255,255,255,0.06)", // subtle web
+      ...pos,
+    });
+    return (
+      <View pointerEvents="none" style={{ position: "absolute", inset: 0 }}>
+        <View style={web({ top: 0, left: 0 })} />
+        <View
+          style={[web({ top: 0, right: 0 }), { transform: [{ scaleX: -1 }] }]}
+        />
+        <View
+          style={[web({ bottom: 0, left: 0 }), { transform: [{ scaleY: -1 }] }]}
+        />
+        <View
+          style={[
+            web({ bottom: 0, right: 0 }),
+            { transform: [{ scaleX: -1 }, { scaleY: -1 }] },
+          ]}
+        />
+      </View>
+    );
+  };
+
+  const Floater = ({ char, size, delay, duration, topPct, yJitter }) => {
+    const x = useRef(new Animated.Value(-40)).current;
+    const y = useRef(new Animated.Value(0)).current;
+    const opacity = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+      if (!isSpookySeason) return;
+      x.setValue(-40);
+      y.setValue(0);
+      opacity.setValue(0);
+
+      const drift = Animated.parallel([
+        Animated.timing(opacity, {
+          toValue: 0.9,
+          duration: 800,
+          delay,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(x, {
+          toValue: 1,
+          duration,
+          delay,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+        Animated.sequence([
+          Animated.timing(y, {
+            toValue: 1,
+            duration: duration / 2,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+          Animated.timing(y, {
+            toValue: 0,
+            duration: duration / 2,
+            easing: Easing.inOut(Easing.sin),
+            useNativeDriver: true,
+          }),
+        ]),
+      ]);
+
+      const loop = Animated.loop(drift);
+      loop.start();
+      return () => loop.stop();
+    }, [x, y, opacity, delay, duration]);
+
+    if (!isSpookySeason) return null;
+
+    const translateX = x.interpolate({
+      inputRange: [-40, 1],
+      outputRange: [-40, 360], // traverse the card width
+    });
+    const translateY = y.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0, -yJitter],
+    });
+
+    return (
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          top: `${topPct}%`,
+          transform: [{ translateX }, { translateY }],
+          opacity,
+        }}
+      >
+        <Text
+          style={{
+            fontSize: size,
+            textShadowColor: "rgba(0,0,0,0.35)",
+            textShadowOffset: { width: 0, height: 1 },
+            textShadowRadius: 3,
+          }}
+        >
+          {char}
+        </Text>
+      </Animated.View>
+    );
+  };
+  // ────────────────────────────────────────────────────────────────────────────────
 
   return (
     <Pressable
@@ -239,6 +374,14 @@ export default function GameCard({ game, playerId, onPress }) {
         }}
       >
         <BlurView intensity={40} tint="dark" style={{ flex: 1, borderRadius: 16 }}>
+          {isSpookySeason && (
+            <View pointerEvents="none" style={{ opacity: 0.25, position: "absolute", inset: 0 }}>
+              <Floater char="👻" size={20} delay={1200} duration={11000} topPct={52} yJitter={200} />
+              <Floater char="🎃" size={16} delay={2200} duration={10000} topPct={78} yJitter={100} />
+            </View>
+          )}
+
+          {/* Original content (unchanged colors/text) */}
           <View style={{ flex: 1, padding: 16 }}>
             <View
               style={{
@@ -305,7 +448,7 @@ export default function GameCard({ game, playerId, onPress }) {
                     color: colors.textSecondary,
                   }}
                 >
-                  {formatPlayed(totalSeconds)}
+                  {formatPlayed(totalPlays)}
                 </Text>
 
                 <Text

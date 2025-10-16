@@ -42,7 +42,7 @@ export const useTetrisGame = () => {
     let mounted = true;
     const setupGameTracking = async () => {
       if (!currentPlayerId) return;
-      const id = await getGameId(GAME_TYPES.TETRIS);
+      const id = await getGameId(GAME_TYPES.BLOCKRISE);
       if (id && mounted) {
         setGameId(id);
         await gameTracker.startGame(id, currentPlayerId);

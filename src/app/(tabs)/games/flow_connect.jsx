@@ -1,18 +1,20 @@
+// src/app/(tabs)/games/flow-connect.jsx   ← rename if your route differs
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { View, Text, TouchableOpacity, Dimensions } from "react-native";
+import { View, Text, TouchableOpacity, Dimensions, Modal, ScrollView } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { BlurView } from "expo-blur";
 import { router } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
-import { ArrowLeft, RotateCcw, Undo } from "lucide-react-native";
+import { ArrowLeft, RotateCcw, Undo, Trophy } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTheme } from "../../../utils/theme";
 import gameTracker from "../../../utils/gameTracking";
 import { getGameId, GAME_TYPES } from "../../../utils/gameUtils";
 import NightSkyBackground from "../../../components/NightSkyBackground";
+import AchievementsSection from "../../../components/AchievementsSection";
 
 /* =========================================================================
    FULL-COVER GENERATOR (embedded) — unchanged logic
@@ -138,6 +140,9 @@ export default function FlowConnectGame() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useTheme();
 
+  // Achievements modal
+  const [showAchievements, setShowAchievements] = useState(false);
+
   // Grid scales with level: 5→6→7 (cap 7 for phones)
   const gridSizeForLevel = useCallback(
     (lvl) => Math.min(7, 5 + Math.floor((lvl - 1) / 3)),
@@ -149,6 +154,7 @@ export default function FlowConnectGame() {
 
   const [currentPlayerId, setCurrentPlayerId] = useState(null);
   const [gameId, setGameId] = useState(null);
+  const gameIdRef = useRef(null);
 
   const [level, setLevel] = useState(1);
   const [moves, setMoves] = useState(0);
@@ -156,6 +162,10 @@ export default function FlowConnectGame() {
   const [paths, setPaths] = useState({});
   const [currentPath, setCurrentPath] = useState(null);
   const [gameWon, setGameWon] = useState(false);
+
+  // live signal helpers (for nice AchievementsSection progress)
+  const pairsConnectedRef = useRef(0);
+  const startTimeRef = useRef(Date.now());
 
   // guard so we only submit once
   const submittedRef = useRef(false);
@@ -171,23 +181,6 @@ export default function FlowConnectGame() {
       }
     };
     loadPlayerId();
-  }, []);
-
-  // Load saved level, then init board for that level
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const savedLvl = await AsyncStorage.getItem(LEVEL_KEY);
-        const startLevel = Math.max(1, parseInt(savedLvl || "1", 10) || 1);
-        if (!mounted) return;
-        initializeGame(startLevel); // also sets level/grid
-      } catch {
-        initializeGame(1);
-      }
-    })();
-    return () => { mounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Save level when it changes
@@ -206,8 +199,12 @@ export default function FlowConnectGame() {
           const id = await getGameId(GAME_TYPES.FLOW_CONNECT);
           if (!active) return;
           setGameId(id);
+          gameIdRef.current = id;
           submittedRef.current = false;
+          pairsConnectedRef.current = 0;
+          startTimeRef.current = Date.now();
           await gameTracker.startGame(id, currentPlayerId);
+          pushSignals(); // initial zeroed snapshot
         } catch (e) {
           console.warn("startGame failed:", e);
         }
@@ -215,20 +212,22 @@ export default function FlowConnectGame() {
 
       start();
 
-      // On blur/unmount: cancel if not submitted
+      // On blur/unmount: close if not submitted
       return () => {
         active = false;
-        if (gameId && !submittedRef.current) {
+        const gid = gameIdRef.current;
+        if (gid && !submittedRef.current) {
           try {
-            gameTracker.endGame(gameId, 0, { cancelled: true, reason: "blur" });
+            pushSignals();
+            gameTracker.endGame(gid, 0, { cancelled: true, reason: "blur" });
           } catch {}
         }
       };
-    }, [currentPlayerId, gameId])
+    }, [currentPlayerId])
   );
 
   const initializeGame = useCallback(
-    (levelToLoad) => {
+    async (levelToLoad) => {
       const lv = levelToLoad ?? level;
       const gs = gridSizeForLevel(lv);
       setLevel(lv);
@@ -240,13 +239,65 @@ export default function FlowConnectGame() {
       setCurrentPath(null);
       setGameWon(false);
       setMoves(0);
+      pairsConnectedRef.current = 0;
+      startTimeRef.current = Date.now();
       submittedRef.current = false;
 
       console.log(
         `🎯 Flow INIT FULL-COVER n=${gs} level=${lv} pairs=${Object.keys(eps).length}`
       );
+      pushSignals({ endpoints: eps, gridSize: gs, level: lv });
     },
     [gridSizeForLevel, level]
+  );
+
+  // Load saved level, then init board for that level
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const savedLvl = await AsyncStorage.getItem(LEVEL_KEY);
+        const startLevel = Math.max(1, parseInt(savedLvl || "1", 10) || 1);
+        if (!mounted) return;
+        await initializeGame(startLevel);
+      } catch {
+        await initializeGame(1);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------------- live signals -> AchievementsSection / tracking ----------------
+  const pushSignals = useCallback(
+    (extra = {}) => {
+      if (!gameIdRef.current) return;
+      const pairsTotal = Object.keys(endpoints || {}).length || 0;
+      const pairsConnected = Object.values(paths || {}).reduce((acc, p) => {
+        // count only completed pairs that include both endpoints
+        if (!p || p.length < 2) return acc;
+        const color = Object.entries(endpoints || {}).find(([, eps]) => {
+          const hasA = p.some((c) => c.row === eps[0].row && c.col === eps[0].col);
+          const hasB = p.some((c) => c.row === eps[1].row && c.col === eps[1].col);
+          return hasA && hasB;
+        });
+        return acc + (color ? 1 : 0);
+      }, 0);
+      pairsConnectedRef.current = pairsConnected;
+
+      gameTracker.updateGameData(gameIdRef.current, {
+        level,
+        grid_size: gridSize,
+        moves,
+        pairs_total: pairsTotal,
+        pairs_connected: pairsConnected,
+        elapsed_seconds: Math.floor((Date.now() - startTimeRef.current) / 1000),
+        ...extra,
+      });
+    },
+    [endpoints, paths, level, gridSize, moves]
   );
 
   const getCellContent = (row, col) => {
@@ -268,7 +319,8 @@ export default function FlowConnectGame() {
 
   const areAdjacent = (a, b) => {
     if (!a || !b) return false;
-    const dr = Math.abs(a.row - b.row), dc = Math.abs(a.col - b.col);
+    const dr = Math.abs(a.row - b.row),
+      dc = Math.abs(a.col - b.col);
     return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
   };
 
@@ -289,6 +341,7 @@ export default function FlowConnectGame() {
       const idx = currentPath.path.findIndex((p) => p.row === row && p.col === col);
       if (idx !== -1) {
         setCurrentPath((prev) => ({ ...prev, path: prev.path.slice(0, idx + 1) }));
+        pushSignals();
         return;
       }
 
@@ -298,6 +351,7 @@ export default function FlowConnectGame() {
         setCurrentPath(null);
         setMoves((m) => m + 1);
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        pushSignals();
         return;
       }
 
@@ -312,6 +366,7 @@ export default function FlowConnectGame() {
       }
 
       setCurrentPath((prev) => ({ ...prev, path: [...prev.path, cell] }));
+      pushSignals();
     } else {
       if (cellContent?.type === "endpoint") {
         const color = cellContent.color;
@@ -322,10 +377,12 @@ export default function FlowConnectGame() {
             return np;
           });
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          pushSignals();
           return;
         }
         setCurrentPath({ color, path: [cell] });
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        pushSignals();
       } else if (cellContent?.type === "path") {
         const color = cellContent.color;
         setPaths((prev) => {
@@ -334,6 +391,7 @@ export default function FlowConnectGame() {
           return np;
         });
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        pushSignals();
       }
     }
   };
@@ -342,6 +400,7 @@ export default function FlowConnectGame() {
     if (currentPath && currentPath.path.length > 1) {
       setCurrentPath((prev) => ({ ...prev, path: prev.path.slice(0, -1) }));
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      pushSignals();
     }
   };
 
@@ -352,6 +411,7 @@ export default function FlowConnectGame() {
     setGameWon(false);
     initializeGame(level);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    pushSignals();
   };
 
   const nextLevel = () => {
@@ -362,6 +422,7 @@ export default function FlowConnectGame() {
     setGameWon(false);
     initializeGame(newLevel);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // pushSignals() will be called inside initializeGame
   };
 
   // Win condition checker + submit exactly once
@@ -372,7 +433,8 @@ export default function FlowConnectGame() {
 
       const seen = new Set();
       const isAdj = (a, b) => {
-        const dr = Math.abs(a.row - b.row), dc = Math.abs(a.col - b.col);
+        const dr = Math.abs(a.row - b.row),
+          dc = Math.abs(a.col - b.col);
         return (dr === 1 && dc === 0) || (dr === 0 && dc === 1);
       };
 
@@ -384,8 +446,7 @@ export default function FlowConnectGame() {
         const hasB = p.some((c) => c.row === eps[1].row && c.col === eps[1].col);
         if (!hasA || !hasB) return false;
 
-        for (let i = 1; i < p.length; i++)
-          if (!isAdj(p[i - 1], p[i])) return false;
+        for (let i = 1; i < p.length; i++) if (!isAdj(p[i - 1], p[i])) return false;
 
         for (const cell of p) {
           const kk = `${cell.row},${cell.col}`;
@@ -399,13 +460,20 @@ export default function FlowConnectGame() {
 
     if (checkWin()) {
       if (!gameWon) setGameWon(true);
-      if (gameId && !submittedRef.current) {
+      pushSignals();
+      if (gameIdRef.current && !submittedRef.current) {
         submittedRef.current = true;
         const score = Math.max(100, 1000 - moves * 10 + level * 100 + gridSize * 50);
-        gameTracker.endGame(gameId, score, { level, gridSize, moves, result: "win" });
+        // Submit; gameTracker will update stats and run achievements
+        gameTracker.endGame(gameIdRef.current, score, {
+          level,
+          gridSize,
+          moves,
+          result: "win",
+        });
       }
     }
-  }, [paths, endpoints, moves, level, gameId, gridSize, gameWon]);
+  }, [paths, endpoints, moves, level, gridSize, gameWon, pushSignals]);
 
   /* ============================== UI ============================== */
 
@@ -417,27 +485,22 @@ export default function FlowConnectGame() {
       <NightSkyBackground />
 
       {/* Header */}
-      <View
-        style={{
-          paddingTop: insets.top + 16,
-          paddingHorizontal: 20,
-          marginBottom: 20,
-        }}
-      >
+      <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20 }}>
         <View
           style={{
             flexDirection: "row",
             alignItems: "center",
             justifyContent: "space-between",
-            marginBottom: 16,
+            marginBottom: 14,
           }}
         >
           <TouchableOpacity
             onPress={() => {
-              // Back should end the session but NOT submit unless completed
-              if (gameId && !submittedRef.current) {
+              const gid = gameIdRef.current;
+              if (gid && !submittedRef.current) {
                 try {
-                  gameTracker.endGame(gameId, 0, { cancelled: true, reason: "back" });
+                  pushSignals();
+                  gameTracker.endGame(gid, 0, { cancelled: true, reason: "back" });
                 } catch {}
               }
               router.back();
@@ -452,10 +515,21 @@ export default function FlowConnectGame() {
           </TouchableOpacity>
 
           <Text style={{ fontSize: 20, fontWeight: "bold", color: colors.text }}>
-            Flow Connect
+            Color Flow
           </Text>
 
           <View style={{ flexDirection: "row", gap: 8 }}>
+            {/* Achievements */}
+            <TouchableOpacity
+              onPress={() => {
+                setShowAchievements(true);
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+              }}
+              style={{ padding: 8, borderRadius: 12, backgroundColor: colors.glassSecondary }}
+            >
+              <Trophy size={22} color={colors.text} />
+            </TouchableOpacity>
+
             <TouchableOpacity
               onPress={undoCurrentPath}
               disabled={!currentPath || currentPath.path.length <= 1}
@@ -463,10 +537,10 @@ export default function FlowConnectGame() {
                 padding: 8,
                 borderRadius: 12,
                 backgroundColor: colors.glassSecondary,
-                opacity: !currentPath || currentPath.path.length <= 1 ? 0.5 : 1,
+                opacity: !currentPath || currentPath.path.length <= 1 ? 0.4 : 1,
               }}
             >
-              <Undo size={24} color={colors.text} />
+              <Undo size={22} color={colors.text} />
             </TouchableOpacity>
             <TouchableOpacity
               onPress={resetGame}
@@ -476,186 +550,118 @@ export default function FlowConnectGame() {
                 backgroundColor: colors.glassSecondary,
               }}
             >
-              <RotateCcw size={24} color={colors.text} />
+              <RotateCcw size={22} color={colors.text} />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Game stats */}
-        <View style={{ borderRadius: 16, overflow: "hidden" }}>
-          <BlurView
-            intensity={isDark ? 60 : 80}
-            tint={isDark ? "dark" : "light"}
-            style={{
-              backgroundColor: isDark
-                ? "rgba(31, 41, 55, 0.7)"
-                : "rgba(255, 255, 255, 0.7)",
-              borderWidth: 1,
-              borderColor: colors.border,
-              borderRadius: 16,
-              padding: 16,
-            }}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Level
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 20,
-                    fontWeight: "bold",
-                    color: colors.gameAccent2,
-                  }}
-                >
-                  {level}
-                </Text>
-              </View>
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Grid
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 20,
-                    fontWeight: "bold",
-                    color: colors.text,
-                  }}
-                >
-                  {gridSize}×{gridSize}
-                </Text>
-              </View>
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Pairs
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 16,
-                    fontWeight: "bold",
-                    color: colors.gameAccent3,
-                  }}
-                >
-                  {Object.keys(endpoints).length}
-                </Text>
-              </View>
-              <View style={{ alignItems: "center" }}>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: colors.textSecondary,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 4,
-                  }}
-                >
-                  Moves
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 20,
-                    fontWeight: "bold",
-                    color: colors.text,
-                  }}
-                >
-                  {moves}
-                </Text>
-              </View>
-            </View>
-          </BlurView>
-        </View>
-      </View>
-
-      {/* Game Board */}
-      <View style={{ flex: 1, justifyContent: "center", paddingHorizontal: 20 }}>
-        <View
+        {/* Stats */}
+        <BlurView
+          intensity={70}
+          tint={isDark ? "dark" : "light"}
           style={{
-            width: gridSize * CELL_SIZE,
-            height: gridSize * CELL_SIZE,
-            backgroundColor: isDark
-              ? "rgba(31, 41, 55, 0.8)"
-              : "rgba(255, 255, 255, 0.9)",
-            borderRadius: 12,
-            padding: 8,
-            alignSelf: "center",
+            borderRadius: 18,
+            padding: 14,
+            borderWidth: 1,
+            borderColor: colors.border,
             marginBottom: 20,
           }}
         >
-          {Array.from({ length: gridSize }, (_, rowIndex) => (
-            <View key={rowIndex} style={{ flexDirection: "row", flex: 1 }}>
-              {Array.from({ length: gridSize }, (_, colIndex) => {
-                const content = getCellContent(rowIndex, colIndex);
+          <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
+            {[
+              ["Level", level, colors.gameAccent2],
+              ["Grid", `${gridSize}×${gridSize}`, colors.text],
+              ["Pairs", Object.keys(endpoints).length, colors.gameAccent3],
+              ["Moves", moves, colors.text],
+            ].map(([label, value, color]) => (
+              <View key={label} style={{ alignItems: "center" }}>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: colors.textSecondary,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {label}
+                </Text>
+                <Text
+                  style={{
+                    fontSize: 18,
+                    fontWeight: "bold",
+                    color,
+                    marginTop: 2,
+                  }}
+                >
+                  {value}
+                </Text>
+              </View>
+            ))}
+          </View>
+        </BlurView>
+      </View>
+
+      {/* Board */}
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+        <BlurView
+          intensity={70}
+          tint={isDark ? "dark" : "light"}
+          style={{
+            width: BOARD_SIDE + 20,
+            height: BOARD_SIDE + 20,
+            borderRadius: 24,
+            overflow: "hidden",
+            justifyContent: "center",
+            alignItems: "center",
+            borderWidth: 1,
+            borderColor: colors.border,
+          }}
+        >
+          {Array.from({ length: gridSize }, (_, r) => (
+            <View key={r} style={{ flexDirection: "row" }}>
+              {Array.from({ length: gridSize }, (_, c) => {
+                const content = getCellContent(r, c);
                 const isCurrentTip =
                   currentPath &&
                   currentPath.path.length > 0 &&
-                  currentPath.path[currentPath.path.length - 1]?.row === rowIndex &&
-                  currentPath.path[currentPath.path.length - 1]?.col === colIndex;
+                  currentPath.path[currentPath.path.length - 1]?.row === r &&
+                  currentPath.path[currentPath.path.length - 1]?.col === c;
 
+                const color = content?.color || colors.glassPrimary;
+                const isEndpointCell = content?.type === "endpoint";
                 return (
                   <TouchableOpacity
-                    key={`${rowIndex}-${colIndex}`}
-                    onPress={() => handleCellTap(rowIndex, colIndex)}
-                    activeOpacity={0.7}
+                    key={`${r}-${c}`}
+                    onPress={() => handleCellTap(r, c)}
+                    activeOpacity={0.8}
                     style={{
-                      flex: 1,
-                      backgroundColor: content
-                        ? content.type === "endpoint"
-                          ? content.color
-                          : content.color + "90"
-                        : isDark
-                        ? "rgba(55, 65, 81, 0.3)"
-                        : "rgba(243, 244, 246, 0.5)",
+                      width: CELL_SIZE,
+                      height: CELL_SIZE,
+                      margin: 2,
+                      borderRadius: isEndpointCell ? CELL_SIZE / 2 : 10,
+                      overflow: "hidden",
+                      borderWidth: isCurrentTip ? 2.5 : 0,
+                      borderColor: isCurrentTip ? color : "transparent",
                       justifyContent: "center",
                       alignItems: "center",
-                      margin: 2,
-                      borderRadius:
-                        content && content.type === "endpoint" ? CELL_SIZE / 2 : 6,
-                      borderWidth: isCurrentTip ? 3 : 0,
-                      borderColor: currentPath?.color || "transparent",
+                      backgroundColor: isEndpointCell
+                        ? color
+                        : content
+                        ? color + "99"
+                        : "rgba(255,255,255,0.05)",
+                      shadowColor: color,
+                      shadowOpacity: 0.4,
+                      shadowRadius: isEndpointCell ? 6 : 2,
+                      shadowOffset: { width: 0, height: 0 },
+                      elevation: isEndpointCell ? 3 : 1,
                     }}
                   >
-                    {content && content.type === "endpoint" && (
-                      <View
+                    {isEndpointCell && (
+                      <LinearGradient
+                        colors={[color, "#ffffff80"]}
                         style={{
-                          width: CELL_SIZE * 0.3,
-                          height: CELL_SIZE * 0.3,
-                          backgroundColor: "#FFFFFF",
-                          borderRadius: CELL_SIZE * 0.15,
-                          shadowColor: "#000",
-                          shadowOffset: { width: 0, height: 2 },
-                          shadowOpacity: 0.3,
-                          shadowRadius: 4,
-                          elevation: 4,
+                          width: CELL_SIZE * 0.35,
+                          height: CELL_SIZE * 0.35,
+                          borderRadius: CELL_SIZE * 0.18,
                         }}
                       />
                     )}
@@ -664,20 +670,20 @@ export default function FlowConnectGame() {
               })}
             </View>
           ))}
-        </View>
+        </BlurView>
 
         <Text
           style={{
-            fontSize: 14,
-            color: colors.textSecondary,
             textAlign: "center",
-            paddingHorizontal: 20,
-            paddingBottom: insets.bottom + 20,
+            color: colors.textSecondary,
+            fontSize: 14,
+            marginTop: 20,
+            paddingHorizontal: 30,
           }}
         >
           {currentPath
-            ? "Tap adjacent cells to continue the line"
-            : "Connect all color pairs. You must fill the entire board."}
+            ? "Draw lines between matching dots"
+            : "Connect all pairs — fill every cell!"}
         </Text>
       </View>
 
@@ -690,92 +696,188 @@ export default function FlowConnectGame() {
             left: 0,
             right: 0,
             bottom: 0,
-            backgroundColor: "rgba(0, 0, 0, 0.7)",
+            backgroundColor: "rgba(0,0,0,0.65)",
             justifyContent: "center",
             alignItems: "center",
           }}
         >
-          <View style={{ borderRadius: 20, overflow: "hidden", margin: 20 }}>
-            <BlurView
-              intensity={isDark ? 80 : 100}
-              tint={isDark ? "dark" : "light"}
+          <BlurView
+            intensity={90}
+            tint={isDark ? "dark" : "light"}
+            style={{
+              borderRadius: 24,
+              padding: 30,
+              alignItems: "center",
+              borderWidth: 1,
+              borderColor: colors.border,
+            }}
+          >
+            <Text
               style={{
-                backgroundColor: isDark
-                  ? "rgba(31, 41, 55, 0.9)"
-                  : "rgba(255, 255, 255, 0.9)",
-                borderWidth: 1,
-                borderColor: colors.border,
-                borderRadius: 20,
-                padding: 32,
-                alignItems: "center",
+                fontSize: 24,
+                fontWeight: "bold",
+                color: colors.text,
+                marginBottom: 8,
               }}
             >
-              <Text
+              🎉 Level Complete
+            </Text>
+            <Text
+              style={{
+                fontSize: 16,
+                color: colors.textSecondary,
+                marginBottom: 20,
+              }}
+            >
+              Solved in {moves} moves
+            </Text>
+            <View style={{ flexDirection: "row", gap: 12 }}>
+              <TouchableOpacity
+                onPress={() => {
+                  setGameWon(false);
+                  resetGame();
+                }}
                 style={{
-                  fontSize: 24,
-                  fontWeight: "bold",
-                  color: colors.text,
-                  textAlign: "center",
-                  marginBottom: 16,
+                  backgroundColor: colors.secondaryButton,
+                  paddingHorizontal: 20,
+                  paddingVertical: 10,
+                  borderRadius: 12,
                 }}
               >
-                🎉 Level Complete!
-              </Text>
-              <Text
-                style={{
-                  fontSize: 18,
-                  color: colors.gameAccent2,
-                  marginBottom: 8,
-                }}
-              >
-                Level {level} solved in {moves} moves
-              </Text>
-
-              <View style={{ flexDirection: "row", gap: 12, marginTop: 20 }}>
-                <TouchableOpacity
-                  onPress={resetGame}
+                <Text
                   style={{
-                    backgroundColor: colors.secondaryButton,
-                    paddingHorizontal: 20,
-                    paddingVertical: 12,
-                    borderRadius: 12,
+                    color: colors.secondaryButtonText,
+                    fontWeight: "600",
+                    fontSize: 14,
                   }}
+                >
+                  Replay
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  setGameWon(false);
+                  nextLevel();
+                }}
+                style={{
+                  backgroundColor: colors.primaryButton,
+                  paddingHorizontal: 20,
+                  paddingVertical: 10,
+                  borderRadius: 12,
+                }}
+              >
+                <Text
+                  style={{
+                    color: colors.primaryButtonText,
+                    fontWeight: "600",
+                    fontSize: 14,
+                  }}
+                >
+                  Next Level
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </BlurView>
+        </View>
+      )}
+
+      {/* Achievements Modal */}
+      <Modal
+        visible={showAchievements}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowAchievements(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)" }}>
+          <View
+            style={{
+              marginTop: insets.top + 12,
+              marginBottom: insets.bottom + 12,
+              flex: 1,
+              paddingHorizontal: 16,
+            }}
+          >
+            <BlurView
+              intensity={isDark ? 70 : 90}
+              tint={isDark ? "dark" : "light"}
+              style={{
+                flex: 1,
+                borderRadius: 16,
+                overflow: "hidden",
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: isDark
+                  ? "rgba(31,41,55,0.8)"
+                  : "rgba(255,255,255,0.85)",
+              }}
+            >
+              {/* Header row */}
+              <View
+                style={{
+                  paddingHorizontal: 16,
+                  paddingVertical: 12,
+                  borderBottomWidth: 1,
+                  borderBottomColor: colors.border,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                <Text
+                  style={{
+                    fontWeight: "700",
+                    fontSize: 16,
+                    color: colors.text,
+                  }}
+                >
+                  Color Flow Achievements
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setShowAchievements(false)}
+                  hitSlop={10}
                 >
                   <Text
                     style={{
-                      fontSize: 14,
                       fontWeight: "600",
-                      color: colors.secondaryButtonText,
+                      fontSize: 14,
+                      color: colors.textSecondary,
                     }}
                   >
-                    Replay
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={nextLevel}
-                  style={{
-                    backgroundColor: colors.primaryButton,
-                    paddingHorizontal: 20,
-                    paddingVertical: 12,
-                    borderRadius: 12,
-                  }}
-                >
-                  <Text
-                    style={{
-                      fontSize: 14,
-                      fontWeight: "600",
-                      color: colors.primaryButtonText,
-                    }}
-                  >
-                    Next Level
+                    Close
                   </Text>
                 </TouchableOpacity>
               </View>
+
+              {/* Content */}
+              <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
+                {currentPlayerId && gameIdRef.current ? (
+                  <AchievementsSection
+                    playerId={currentPlayerId}
+                    gameId={gameIdRef.current}
+                    autoRefreshMs={15000}
+                    showSearchBar
+                    showFilters
+                  />
+                ) : (
+                  <View style={{ padding: 16 }}>
+                    <Text
+                      style={{
+                        color: colors.textSecondary,
+                        textAlign: "center",
+                        fontWeight: "500",
+                      }}
+                    >
+                      Loading achievements…
+                    </Text>
+                  </View>
+                )}
+              </ScrollView>
             </BlurView>
           </View>
         </View>
-      )}
+      </Modal>
+
+      <View style={{ height: insets.bottom + 16 }} />
     </View>
   );
 }
